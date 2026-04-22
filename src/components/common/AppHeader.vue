@@ -35,7 +35,7 @@ async function handleSignOut() {
       />
 
       <q-toolbar-title class="logo" shrink>
-        <span class="logo-text">Terrain</span><span class="logo-accent">IQ</span>
+        <span class="logo-text">Ridge</span><span class="logo-accent">Read</span>
         <span class="logo-badge q-ml-sm">ELK TERRAIN INTELLIGENCE</span>
       </q-toolbar-title>
 

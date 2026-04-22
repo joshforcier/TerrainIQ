@@ -377,7 +377,7 @@ const pricingTiers = [
     <footer class="landing-footer">
       <div class="footer-inner">
         <div class="footer-brand">
-          <span class="text-white text-weight-bold">Terrain</span><span class="text-amber">IQ</span>
+          <span class="text-white text-weight-bold">Ridge</span><span class="text-amber">Read</span>
           <span class="footer-tagline">Built by elk hunters who got tired of guessing.</span>
         </div>
         <div class="footer-links">

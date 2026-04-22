@@ -431,75 +431,86 @@ ${features.join('\n')}
       PRESSURES.map(async (pressure) => {
         const key: ComboKey = `${timeOfDay}_${pressure}`
 
-        const prompt = buildPrompt(
-          season, timeOfDay, pressure, bounds, centerLat, centerLng,
-          terrain, featuresList, terrainSummary,
-          roadAvoidanceSection, terrainFeaturesSection,
-          bufferMiles, bufferMeters,
-        )
+        try {
+          const prompt = buildPrompt(
+            season, timeOfDay, pressure, bounds, centerLat, centerLng,
+            terrain, featuresList, terrainSummary,
+            roadAvoidanceSection, terrainFeaturesSection,
+            bufferMiles, bufferMeters,
+          )
 
-        const completion = await openai.chat.completions.create({
-          model: 'gpt-5.4-mini',
-          messages: [{ role: 'user', content: prompt }],
-          temperature: 0.7,
-          max_completion_tokens: 8000,
-          response_format: { type: 'json_object' },
-        })
+          const completion = await openai.chat.completions.create({
+            model: 'gpt-5.4-mini',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.7,
+            max_completion_tokens: 8000,
+            response_format: { type: 'json_object' },
+          })
 
-        const content = completion.choices[0]?.message?.content
-        if (!content) {
-          console.warn(`Empty response for ${key}`)
+          const choice = completion.choices[0]
+          const content = choice?.message?.content
+          if (!content) {
+            console.warn(`Empty response for ${key} (finish_reason: ${choice?.finish_reason})`)
+            return { key, pois: [] }
+          }
+          if (choice?.finish_reason === 'length') {
+            console.warn(`Truncated response for ${key} (hit max_completion_tokens) — skipping`)
+            return { key, pois: [] }
+          }
+
+          const parsed = JSON.parse(content)
+          const rawPois = parsed.pois || []
+
+          // Server-side buffer enforcement
+          const townBufferMeters = 5 * METERS_PER_MILE // 5 miles from any town
+          const filteredPois = rawPois.filter((poi: { lat: number; lng: number; name?: string }) => {
+            // Road/trail buffer
+            if (roadTrailSegments.length > 0) {
+              if (isNearRoadOrTrail(poi.lat, poi.lng, roadTrailSegments, bufferMeters)) {
+                return false
+              }
+            }
+            // Building buffer
+            for (const bPt of buildingPoints) {
+              if (haversineMeters(poi.lat, poi.lng, bPt.lat, bPt.lng) < bufferMeters) {
+                return false
+              }
+            }
+            // Town buffer (5 miles)
+            for (const tPt of townPoints) {
+              if (haversineMeters(poi.lat, poi.lng, tPt.lat, tPt.lng) < townBufferMeters) {
+                return false
+              }
+            }
+            return true
+          })
+
+          // ── Terrain verification: attach real elevation/slope/aspect ──
+          const verifiedPois = filteredPois.map((poi: {
+            lat: number
+            lng: number
+            name?: string
+            type?: string
+            relatedBehaviors?: string[]
+            description?: string
+          }) => {
+            const real = lookupTerrain(poi.lat, poi.lng, terrainPoints)
+            return {
+              ...poi,
+              elevation: real.elevation,
+              elevationFt: mToFt(real.elevation),
+              slope: real.slope,
+              aspect: real.aspect,
+            }
+          })
+
+          console.log(`  ${key}: ${rawPois.length} generated, ${verifiedPois.length} passed buffer (verified terrain)`)
+          return { key, pois: verifiedPois }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err)
+          console.error(`Combo ${key} failed: ${message}`)
           return { key, pois: [] }
         }
-
-        const parsed = JSON.parse(content)
-        const rawPois = parsed.pois || []
-
-        // Server-side buffer enforcement
-        const townBufferMeters = 5 * METERS_PER_MILE // 5 miles from any town
-        const filteredPois = rawPois.filter((poi: { lat: number; lng: number; name?: string }) => {
-          // Road/trail buffer
-          if (roadTrailSegments.length > 0) {
-            if (isNearRoadOrTrail(poi.lat, poi.lng, roadTrailSegments, bufferMeters)) {
-              return false
-            }
-          }
-          // Building buffer
-          for (const bPt of buildingPoints) {
-            if (haversineMeters(poi.lat, poi.lng, bPt.lat, bPt.lng) < bufferMeters) {
-              return false
-            }
-          }
-          // Town buffer (5 miles)
-          for (const tPt of townPoints) {
-            if (haversineMeters(poi.lat, poi.lng, tPt.lat, tPt.lng) < townBufferMeters) {
-              return false
-            }
-          }
-          return true
-        })
-
-        // ── Terrain verification: attach real elevation/slope/aspect ──
-        const verifiedPois = filteredPois.map((poi: {
-          lat: number
-          lng: number
-          name?: string
-          type?: string
-          relatedBehaviors?: string[]
-          description?: string
-        }) => {
-          const real = lookupTerrain(poi.lat, poi.lng, terrainPoints)
-          return {
-            ...poi,
-            elevation: real.elevation,
-            elevationFt: mToFt(real.elevation),
-            slope: real.slope,
-            aspect: real.aspect,
-          }
-        })
-
-        console.log(`  ${key}: ${rawPois.length} generated, ${verifiedPois.length} passed buffer (verified terrain)`)
-        return { key, pois: verifiedPois }
       })
     )
 
