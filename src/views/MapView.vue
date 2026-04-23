@@ -28,12 +28,38 @@ const aiError = computed(() => mapContainerRef.value?.error ?? null)
 const hasResults = computed(() => mapContainerRef.value?.hasResults ?? false)
 const aiPoisCount = computed(() => mapContainerRef.value?.pois?.length ?? 0)
 
-// Selection box state
-const selectionActive = computed(() => mapContainerRef.value?.selection?.isActive ?? false)
-const selectionLocked = computed(() => mapContainerRef.value?.selection?.isLocked ?? false)
+// `selection` is an object exposed via defineExpose — Vue only auto-unwraps refs at
+// the top level of the exposed surface, so we have to read `.value` explicitly here.
+const selectionActive = computed(() => mapContainerRef.value?.selection?.isActive?.value ?? false)
+const selectionLocked = computed(() => mapContainerRef.value?.selection?.isLocked?.value ?? false)
+
+type Mode = 'idle' | 'selecting' | 'placed' | 'analyzing' | 'done'
+
+const mode = computed<Mode>(() => {
+  if (hasResults.value) return 'done'
+  if (aiLoading.value) return 'analyzing'
+  if (selectionLocked.value) return 'placed'
+  if (selectionActive.value) return 'selecting'
+  return 'idle'
+})
+
+function isStepActive(n: 1 | 2 | 3): boolean {
+  if (n === 1) return mode.value === 'idle' || mode.value === 'selecting'
+  if (n === 2) return mode.value === 'placed' || mode.value === 'analyzing'
+  return mode.value === 'done'
+}
+
+function isStepDone(n: 1 | 2): boolean {
+  if (n === 1) return mode.value === 'placed' || mode.value === 'analyzing' || mode.value === 'done'
+  return mode.value === 'done'
+}
 
 function startSelection() {
   mapContainerRef.value?.selection?.activate()
+}
+
+function cancelSelection() {
+  mapContainerRef.value?.selection?.deactivate()
 }
 
 function analyzeArea() {
@@ -51,68 +77,81 @@ function resetAll() {
     <HoverTooltip v-if="hoverScores" :scores="hoverScores" />
     <InfoPanel />
 
-    <!-- Analyze controls -->
-    <div class="analyze-controls">
-      <!-- Step 1: Select Area -->
-      <button
-        v-if="!selectionActive && !selectionLocked && !hasResults"
-        class="map-btn map-btn--primary"
-        @click="startSelection"
-      >
-        <q-icon name="crop_free" size="18px" />
-        <span>Select Area</span>
-        <q-tooltip class="custom-tooltip">
-          Click to start placing a 5 mi × 5 mi analysis box
-        </q-tooltip>
-      </button>
-
-      <!-- Selecting hint -->
-      <div
-        v-if="selectionActive && !selectionLocked"
-        class="map-chip"
-      >
-        <q-icon name="ads_click" size="16px" />
-        <span>Click the map to place the box</span>
+    <!-- Stepper panel -->
+    <div class="stepper-card">
+      <div class="stepper-track">
+        <div class="step" :class="{ 'step--active': isStepActive(1), 'step--done': isStepDone(1) }">
+          <span class="step-num">
+            <q-icon v-if="isStepDone(1)" name="check" size="12px" />
+            <template v-else>1</template>
+          </span>
+          <span class="step-label">Select</span>
+        </div>
+        <div class="step-divider" />
+        <div class="step" :class="{ 'step--active': isStepActive(2), 'step--done': isStepDone(2) }">
+          <span class="step-num">
+            <q-icon v-if="isStepDone(2)" name="check" size="12px" />
+            <template v-else>2</template>
+          </span>
+          <span class="step-label">Analyze</span>
+        </div>
+        <div class="step-divider" />
+        <div class="step" :class="{ 'step--active': isStepActive(3) }">
+          <span class="step-num">3</span>
+          <span class="step-label">Done</span>
+        </div>
       </div>
 
-      <!-- Step 2: Analyze (after box is placed) -->
-      <button
-        v-if="selectionLocked && !hasResults"
-        class="map-btn map-btn--primary"
-        :disabled="aiLoading"
-        @click="analyzeArea"
-      >
-        <q-spinner-dots v-if="aiLoading" color="dark" size="18px" />
-        <q-icon v-else name="auto_awesome" size="18px" />
-        <span>{{ aiLoading ? 'Analyzing all combos...' : 'Analyze Area' }}</span>
-      </button>
+      <div class="stepper-body">
+        <template v-if="mode === 'idle'">
+          <p class="step-caption">Pick a 5 × 5 mi area to analyze.</p>
+          <button class="map-btn map-btn--primary" @click="startSelection">
+            <q-icon name="crop_free" size="18px" />
+            <span>Select Area</span>
+          </button>
+        </template>
 
-      <!-- Reposition button -->
-      <button
-        v-if="selectionLocked && !hasResults && !aiLoading"
-        class="map-btn map-btn--ghost"
-        @click="startSelection"
-      >
-        <q-icon name="near_me" size="16px" />
-        <span>Reposition</span>
-      </button>
+        <template v-else-if="mode === 'selecting'">
+          <p class="step-caption step-caption--pulse">
+            <q-icon name="ads_click" size="14px" />
+            Click the map to place the box.
+          </p>
+          <button class="map-btn map-btn--ghost map-btn--sm" @click="cancelSelection">
+            Cancel
+          </button>
+        </template>
 
-      <!-- Reset (after analysis complete) -->
-      <button
-        v-if="hasResults"
-        class="map-btn map-btn--ghost"
-        @click="resetAll"
-      >
-        <q-icon name="restart_alt" size="16px" />
-        <span>New Selection</span>
-      </button>
-    </div>
+        <template v-else-if="mode === 'placed'">
+          <p class="step-caption">Box placed. Ready to analyze.</p>
+          <button class="map-btn map-btn--primary" @click="analyzeArea">
+            <q-icon name="auto_awesome" size="18px" />
+            <span>Analyze Area</span>
+          </button>
+          <button class="map-btn map-btn--ghost map-btn--sm" @click="startSelection">
+            <q-icon name="near_me" size="14px" />
+            Reposition
+          </button>
+        </template>
 
-    <!-- AI POI count badge -->
-    <div v-if="hasResults" class="ai-badge">
-      <q-icon name="auto_awesome" size="14px" />
-      {{ aiPoisCount }} POIs
-      <span class="ai-badge-hint">Change time/pressure to update</span>
+        <template v-else-if="mode === 'analyzing'">
+          <p class="step-caption step-caption--pulse">
+            <q-spinner-dots color="amber" size="16px" />
+            Analyzing all combos...
+          </p>
+        </template>
+
+        <template v-else-if="mode === 'done'">
+          <p class="step-caption">
+            <q-icon name="auto_awesome" size="14px" color="amber" />
+            <strong>{{ aiPoisCount }}</strong>&nbsp;POIs generated.
+          </p>
+          <p class="step-caption-hint">Change time/pressure on the sidebar to update.</p>
+          <button class="map-btn map-btn--ghost map-btn--sm" @click="resetAll">
+            <q-icon name="restart_alt" size="14px" />
+            New Selection
+          </button>
+        </template>
+      </div>
     </div>
 
     <!-- Error notification -->
@@ -162,30 +201,146 @@ function resetAll() {
   bottom: 0;
 }
 
-/* ─── Controls ─── */
-.analyze-controls {
+/* ─── Stepper Card ─── */
+.stepper-card {
   position: absolute;
   top: 12px;
   right: 12px;
   z-index: 1000;
+  width: 280px;
+  background: rgba(15, 25, 35, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid #1e2d3d;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.stepper-track {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #1e2d3d;
+  background: rgba(10, 14, 20, 0.5);
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  opacity: 0.45;
+  transition: opacity 0.2s;
+}
+
+.step--active,
+.step--done {
+  opacity: 1;
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(200, 214, 229, 0.08);
+  border: 1px solid rgba(200, 214, 229, 0.2);
+  color: #6b7c8d;
+  font-size: 11px;
+  font-weight: 700;
+  transition: all 0.2s;
+}
+
+.step--active .step-num {
+  background: #e8c547;
+  color: #0a0e14;
+  border-color: #e8c547;
+  box-shadow: 0 0 0 3px rgba(232, 197, 71, 0.18);
+}
+
+.step--done .step-num {
+  background: rgba(232, 197, 71, 0.2);
+  color: #e8c547;
+  border-color: rgba(232, 197, 71, 0.4);
+}
+
+.step-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #6b7c8d;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  transition: color 0.2s;
+}
+
+.step--active .step-label {
+  color: #e8c547;
+}
+
+.step--done .step-label {
+  color: #c8d6e5;
+}
+
+.step-divider {
+  flex: 1 1 auto;
+  height: 1px;
+  background: #1e2d3d;
+}
+
+.stepper-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step-caption {
+  margin: 0;
+  font-size: 13px;
+  color: #c8d6e5;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.step-caption--pulse {
+  color: #e8c547;
+  font-weight: 600;
+  animation: pulse-text 1.5s ease-in-out infinite;
+}
+
+.step-caption-hint {
+  margin: -4px 0 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #6b7c8d;
+  line-height: 1.4;
+}
+
+@keyframes pulse-text {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 /* ─── Map Buttons ─── */
 .map-btn {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
-  padding: 10px 18px;
-  border-radius: 10px;
+  padding: 10px 16px;
+  border-radius: 8px;
   border: none;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   transition: all 0.2s;
   white-space: nowrap;
+  width: 100%;
 }
 
 .map-btn--primary {
@@ -207,60 +362,20 @@ function resetAll() {
 }
 
 .map-btn--ghost {
-  background: rgba(15, 25, 35, 0.85);
+  background: rgba(15, 25, 35, 0.6);
   color: #c8d6e5;
   border: 1px solid #1e2d3d;
-  backdrop-filter: blur(12px);
 }
 
 .map-btn--ghost:hover {
-  background: rgba(15, 25, 35, 0.95);
+  background: rgba(15, 25, 35, 0.85);
   border-color: #3a4f65;
 }
 
-/* ─── Map Chip ─── */
-.map-chip {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 10px 18px;
-  border-radius: 10px;
-  background: #e8c547;
-  color: #0a0e14;
-  font-size: 13px;
-  font-weight: 700;
-  box-shadow: 0 4px 16px rgba(232, 197, 71, 0.2);
-  animation: pulse-chip 2s ease-in-out infinite;
-}
-
-@keyframes pulse-chip {
-  0%, 100% { box-shadow: 0 4px 16px rgba(232, 197, 71, 0.2); }
-  50% { box-shadow: 0 4px 24px rgba(232, 197, 71, 0.35); }
-}
-
-/* ─── AI Badge ─── */
-.ai-badge {
-  position: absolute;
-  top: 56px;
-  right: 12px;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: 8px;
-  background: rgba(232, 197, 71, 0.12);
-  border: 1px solid rgba(232, 197, 71, 0.2);
-  color: #e8c547;
+.map-btn--sm {
+  padding: 7px 12px;
   font-size: 12px;
-  font-weight: 700;
-}
-
-.ai-badge-hint {
-  font-weight: 500;
-  color: rgba(232, 197, 71, 0.6);
-  font-size: 11px;
-  margin-left: 4px;
+  font-weight: 600;
 }
 
 /* ─── Error ─── */
@@ -281,16 +396,6 @@ function resetAll() {
   font-size: 13px;
   line-height: 1.5;
   backdrop-filter: blur(12px);
-}
-
-/* ─── Tooltip ─── */
-.custom-tooltip {
-  background: #111a24;
-  color: #c8d6e5;
-  border: 1px solid #1e2d3d;
-  font-size: 12px;
-  border-radius: 8px;
-  padding: 8px 12px;
 }
 
 /* ─── Map Tools Bar ─── */
@@ -350,6 +455,10 @@ function resetAll() {
 }
 
 @media (max-width: 599px) {
+  .stepper-card {
+    width: calc(100vw - 24px);
+    max-width: 320px;
+  }
   .layer-label {
     display: none;
   }
