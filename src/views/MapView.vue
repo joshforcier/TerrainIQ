@@ -3,8 +3,13 @@ import { ref, computed } from 'vue'
 import MapContainer from '@/components/map/MapContainer.vue'
 import HoverTooltip from '@/components/map/HoverTooltip.vue'
 import InfoPanel from '@/components/map/InfoPanel.vue'
+import PoiDetailPanel from '@/components/map/PoiDetailPanel.vue'
+import PoiHoverCard from '@/components/map/PoiHoverCard.vue'
+import type L from 'leaflet'
 import type { HoverScores } from '@/composables/useHoverInfo'
 import { useMapStore, type BaseLayer } from '@/stores/map'
+import { downloadGpx } from '@/utils/exportGpx'
+import type { PointOfInterest } from '@/data/pointsOfInterest'
 
 const mapStore = useMapStore()
 
@@ -28,6 +33,7 @@ const aiError = computed(() => mapContainerRef.value?.error ?? null)
 const hasResults = computed(() => mapContainerRef.value?.hasResults ?? false)
 const aiPoisCount = computed(() => mapContainerRef.value?.pois?.length ?? 0)
 const fromCache = computed(() => mapContainerRef.value?.fromCache ?? false)
+const mapInstance = computed<L.Map | null>(() => (mapContainerRef.value?.map as L.Map | null) ?? null)
 
 // `selection` is an object exposed via defineExpose — Vue only auto-unwraps refs at
 // the top level of the exposed surface, so we have to read `.value` explicitly here.
@@ -70,6 +76,16 @@ function analyzeArea() {
 function resetAll() {
   mapContainerRef.value?.resetAll()
 }
+
+function exportGpx() {
+  const pois = mapContainerRef.value?.pois as PointOfInterest[] | undefined
+  if (!pois || pois.length === 0) return
+  downloadGpx(pois, {
+    season: mapStore.season,
+    timeOfDay: mapStore.timeOfDay,
+    pressure: mapStore.huntingPressure,
+  })
+}
 </script>
 
 <template>
@@ -77,6 +93,8 @@ function resetAll() {
     <MapContainer ref="mapContainerRef" />
     <HoverTooltip v-if="hoverScores" :scores="hoverScores" />
     <InfoPanel />
+    <PoiDetailPanel />
+    <PoiHoverCard :map="mapInstance" />
 
     <!-- Stepper panel -->
     <div class="stepper-card">
@@ -154,6 +172,13 @@ function resetAll() {
               ? 'Loaded from a previous analysis of this area.'
               : 'Change time/pressure on the sidebar to update.' }}
           </p>
+          <p class="step-disclaimer">
+            High-probability terrain for the selected season, time, and pressure.
+          </p>
+          <button class="map-btn map-btn--ghost map-btn--sm" @click="exportGpx">
+            <q-icon name="download" size="14px" />
+            Export GPX (OnX)
+          </button>
           <button class="map-btn map-btn--ghost map-btn--sm" @click="resetAll">
             <q-icon name="restart_alt" size="14px" />
             New Selection
@@ -326,6 +351,17 @@ function resetAll() {
   font-size: 11px;
   font-weight: 500;
   color: #6b7c8d;
+  line-height: 1.4;
+}
+
+.step-disclaimer {
+  margin: 4px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid #1e2d3d;
+  font-size: 10px;
+  font-style: italic;
+  font-weight: 500;
+  color: #5d6e80;
   line-height: 1.4;
 }
 

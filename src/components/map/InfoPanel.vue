@@ -44,6 +44,10 @@ function show() {
     </div>
     <div class="panel-heading">{{ heading }}</div>
     <div class="panel-body">{{ currentNote }}</div>
+    <div class="panel-disclaimer">
+      High-probability terrain for the selected season, time, and pressure.
+      But ultimately, elk are where they are.
+    </div>
   </div>
 </template>
 
@@ -127,6 +131,17 @@ function show() {
 .panel-body::-webkit-scrollbar-thumb {
   background: #2a3f55;
   border-radius: 2px;
+}
+
+.panel-disclaimer {
+  flex-shrink: 0;
+  padding: 8px 10px 10px;
+  border-top: 1px solid #1e2d3d;
+  font-size: 10px;
+  font-style: italic;
+  font-weight: 500;
+  color: #5d6e80;
+  line-height: 1.4;
 }
 
 /* ─── Collapsed toggle ─── */

@@ -1,8 +1,11 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { LatLng } from '@/types/map'
 import type { Season, TimeOfDay, BehaviorLayer } from '@/data/elkBehavior'
 import { behaviorWeights } from '@/data/elkBehavior'
+import type { PointOfInterest } from '@/data/pointsOfInterest'
+
+export type SidebarTab = 'controls' | 'pois'
 
 export type HuntingPressure = 'low' | 'medium' | 'high'
 
@@ -20,10 +23,46 @@ export const useMapStore = defineStore('map', () => {
   const activeBehaviors = ref<BehaviorLayer[]>(['feeding', 'water', 'bedding', 'wallows', 'travel', 'security'])
   const intensity = ref(0.7) // heatmap opacity 0–1
   const showHeatmap = ref(false)
-  const showOverlayZones = ref(true)
   const bufferMiles = ref(0.5) // road/trail/building buffer in miles
   const huntingPressure = ref<HuntingPressure>('medium')
   const seasonLocked = ref(false)
+
+  // POI presentation state (POI list lives in useAIPois; mirrored here so the
+  // sidebar and detail panel can read it without a direct composable dependency)
+  const currentPois = ref<PointOfInterest[]>([])
+  const pinnedPoiId = ref<string | null>(null)
+  const hoveredPoiId = ref<string | null>(null)
+  const sidebarTab = ref<SidebarTab>('controls')
+
+  // POIs preserved across "New Selection" so previous analyses stay on the map
+  const keptPois = ref<PointOfInterest[]>([])
+
+  // Per-POI deletions, persisted to localStorage so they survive refreshes
+  const DELETED_POI_KEY = 'ridgeread.deletedPoiIds'
+  function loadDeletedIds(): Set<string> {
+    try {
+      const raw = localStorage.getItem(DELETED_POI_KEY)
+      if (!raw) return new Set()
+      const arr = JSON.parse(raw) as unknown
+      return Array.isArray(arr) ? new Set(arr.filter((x): x is string => typeof x === 'string')) : new Set()
+    } catch {
+      return new Set()
+    }
+  }
+  const deletedPoiIds = ref<Set<string>>(loadDeletedIds())
+  watch(
+    deletedPoiIds,
+    (set) => {
+      try { localStorage.setItem(DELETED_POI_KEY, JSON.stringify([...set])) } catch { /* ignore */ }
+    },
+    { deep: true },
+  )
+
+  const pinnedPoi = computed<PointOfInterest | null>(() =>
+    pinnedPoiId.value
+      ? currentPois.value.find((p) => p.id === pinnedPoiId.value) ?? null
+      : null,
+  )
 
   // Pressure multipliers: scales security up and feeding/travel down at high pressure
   const pressureModifiers: Record<HuntingPressure, Record<BehaviorLayer, number>> = {
@@ -79,16 +118,60 @@ export const useMapStore = defineStore('map', () => {
     intensity.value = val
   }
 
-  function toggleOverlayZones() {
-    showOverlayZones.value = !showOverlayZones.value
-  }
-
   function setBaseLayer(layer: BaseLayer) {
     baseLayer.value = layer
   }
 
   function setHuntingPressure(p: HuntingPressure) {
     huntingPressure.value = p
+  }
+
+  function setCurrentPois(pois: PointOfInterest[]) {
+    currentPois.value = pois
+    if (pinnedPoiId.value && !pois.some((p) => p.id === pinnedPoiId.value)) {
+      pinnedPoiId.value = null
+    }
+  }
+
+  function pinPoi(id: string | null) {
+    pinnedPoiId.value = id
+  }
+
+  function setHoveredPoi(id: string | null) {
+    hoveredPoiId.value = id
+  }
+
+  function setSidebarTab(tab: SidebarTab) {
+    sidebarTab.value = tab
+  }
+
+  function archivePois(pois: PointOfInterest[]) {
+    if (pois.length === 0) return
+    const existing = new Set(keptPois.value.map((p) => p.id))
+    const newOnes = pois.filter((p) => !existing.has(p.id))
+    if (newOnes.length === 0) return
+    keptPois.value = [...keptPois.value, ...newOnes]
+  }
+
+  function clearKeptPois() {
+    keptPois.value = []
+  }
+
+  function deletePoi(id: string) {
+    deletedPoiIds.value = new Set([...deletedPoiIds.value, id])
+    if (pinnedPoiId.value === id) pinnedPoiId.value = null
+    if (hoveredPoiId.value === id) hoveredPoiId.value = null
+  }
+
+  function restorePoi(id: string) {
+    if (!deletedPoiIds.value.has(id)) return
+    const next = new Set(deletedPoiIds.value)
+    next.delete(id)
+    deletedPoiIds.value = next
+  }
+
+  function clearDeletedPois() {
+    deletedPoiIds.value = new Set()
   }
 
   return {
@@ -100,11 +183,17 @@ export const useMapStore = defineStore('map', () => {
     activeBehaviors,
     intensity,
     showHeatmap,
-    showOverlayZones,
     bufferMiles,
     huntingPressure,
     seasonLocked,
     currentWeights,
+    currentPois,
+    pinnedPoiId,
+    pinnedPoi,
+    hoveredPoiId,
+    sidebarTab,
+    keptPois,
+    deletedPoiIds,
     setView,
     setBaseLayer,
     setSeason,
@@ -114,6 +203,14 @@ export const useMapStore = defineStore('map', () => {
     setHuntingPressure,
     lockSeason,
     unlockSeason,
-    toggleOverlayZones,
+    setCurrentPois,
+    pinPoi,
+    setHoveredPoi,
+    setSidebarTab,
+    archivePois,
+    clearKeptPois,
+    deletePoi,
+    restorePoi,
+    clearDeletedPois,
   }
 })
