@@ -161,7 +161,7 @@ function deletePoi() {
 .poi-detail-panel {
   position: absolute;
   top: 12px;
-  right: 312px;
+  right: 352px;
   width: 360px;
   max-height: calc(100vh - 96px);
   z-index: 1001;

@@ -13,15 +13,16 @@ export type EnabledLayers = Record<BehaviorLayer, boolean>
 export type ConfidenceMap = Partial<Record<BehaviorLayer, number>>
 
 /**
- * Per-POI per-behavior confidence (0–100). Combines the current season ×
- * time × pressure weights with a per-POI position bias: the AI lists
- * behaviors in order of relevance to that POI's terrain, so the first
- * listed gets a strong boost (becomes the dominant behavior most of the
- * time), the second a mild boost, and the rest are dampened. This gives
- * each POI a stable "primary color" regardless of time-of-day, while
- * letting weights still scale the magnitude.
+ * Per-POI per-behavior confidence (0–100). Each position in a POI's
+ * `relatedBehaviors` array gets a base confidence from its rank, then is
+ * modulated (but not dominated) by the current season/time/pressure weight.
+ * The base ceiling (85) prevents the "everything is 100%" saturation we'd
+ * get by multiplying weights × large position multipliers.
+ *
+ * Dominance is decided separately by {@link dominantBehavior} using position
+ * order, so a POI's hex color/glyph stays consistent across time-of-day.
  */
-const POSITION_MULTIPLIERS = [1.6, 0.95, 0.7, 0.55, 0.45, 0.4] as const
+const POSITION_BASE = [85, 65, 50, 38, 30, 25] as const
 
 export function deriveConfidence(
   poi: PointOfInterest,
@@ -29,24 +30,32 @@ export function deriveConfidence(
 ): ConfidenceMap {
   const conf: ConfidenceMap = {}
   poi.relatedBehaviors.forEach((b, i) => {
-    const mult = POSITION_MULTIPLIERS[i] ?? 0.4
-    const value = (currentWeights[b] ?? 0) * 100 * mult
+    const base = POSITION_BASE[i] ?? 25
+    const weight = currentWeights[b] ?? 0 // 0..1
+    // 0.5–1.0 modulation of the base: keeps position order mostly intact
+    // while still letting time-of-day nudge numeric confidences up/down.
+    const value = base * (0.5 + weight * 0.5)
     conf[b] = Math.min(100, Math.max(0, Math.round(value)))
   })
   return conf
 }
 
+/**
+ * The POI's primary behavior for display (hex color + glyph). Uses the AI's
+ * stated ordering rather than numeric confidence — position 0 is the
+ * behavior the terrain was *classified* for; it should stay the same
+ * regardless of time-of-day weighting. When the primary is disabled via
+ * the sidebar layers, falls back to the next enabled behavior in order.
+ */
 export function dominantBehavior(
   poi: PointOfInterest,
-  conf: ConfidenceMap,
+  _conf: ConfidenceMap,
   enabledLayers: EnabledLayers,
 ): BehaviorLayer | null {
-  const candidates = poi.relatedBehaviors.filter((b) => enabledLayers[b])
-  if (candidates.length === 0) return null
-  return candidates.reduce<BehaviorLayer>(
-    (best, b) => ((conf[b] ?? 0) > (conf[best] ?? -1) ? b : best),
-    candidates[0],
-  )
+  for (const b of poi.relatedBehaviors) {
+    if (enabledLayers[b]) return b
+  }
+  return null
 }
 
 export function topConfidence(

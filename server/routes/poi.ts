@@ -14,6 +14,7 @@ import {
   computeSlopeAspect,
   type TerrainPoint,
 } from '../services/terrainAnalysis.js'
+import { isInElkRange } from '../services/elkRange.js'
 
 function getClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY
@@ -76,6 +77,89 @@ function lookupTerrain(
 
 function mToFt(m: number): string {
   return Math.round(m * 3.28084).toLocaleString()
+}
+
+/**
+ * Slope/aspect bounds each POI type must respect to be plausible.
+ * A POI whose verified slope falls outside these bounds is almost certainly
+ * the AI making up terrain that doesn't exist at the coordinates it picked.
+ */
+function terrainMatchesType(type: string | undefined, slope: number): boolean {
+  switch ((type ?? '').toLowerCase()) {
+    case 'meadow':   return slope <= 15            // flat to gentle open ground
+    case 'wallow':   return slope <= 12            // flat boggy spots
+    case 'bench':    return slope >= 4 && slope <= 28 // a step on a slope
+    case 'drainage': return slope >= 4             // drainages run downhill
+    case 'saddle':   return slope <= 25            // low point between highs
+    case 'spring':   return slope <= 25            // spring sources
+    default:         return true                    // unknown types — don't block
+  }
+}
+
+/**
+ * Reject POIs that look like valley-bottom road corridors OSM forgot:
+ * very low slope AND within 50m of the area's minimum elevation.
+ */
+function looksLikeHiddenRoad(slope: number, elevation: number, minElevation: number): boolean {
+  return slope < 3 && (elevation - minElevation) < 50
+}
+
+/**
+ * Detect POIs that are part of a grid/line cluster — 4+ POIs sharing
+ * (approximately) the same latitude or longitude. Returns the indices to drop.
+ */
+function findGridOutliers(
+  pois: Array<{ lat: number; lng: number }>,
+  toleranceMeters = 40,
+  minCluster = 4,
+): Set<number> {
+  const outliers = new Set<number>()
+  if (pois.length < minCluster) return outliers
+
+  const sharedLat = new Array(pois.length).fill(0)
+  const sharedLng = new Array(pois.length).fill(0)
+
+  for (let i = 0; i < pois.length; i++) {
+    const p = pois[i]
+    const cosLat = Math.cos((p.lat * Math.PI) / 180)
+    for (let j = i + 1; j < pois.length; j++) {
+      const q = pois[j]
+      const dLatM = Math.abs(p.lat - q.lat) * 111320
+      const dLngM = Math.abs(p.lng - q.lng) * 111320 * cosLat
+      if (dLatM < toleranceMeters) { sharedLat[i]++; sharedLat[j]++ }
+      if (dLngM < toleranceMeters) { sharedLng[i]++; sharedLng[j]++ }
+    }
+  }
+
+  for (let i = 0; i < pois.length; i++) {
+    if (sharedLat[i] >= minCluster - 1 || sharedLng[i] >= minCluster - 1) {
+      outliers.add(i)
+    }
+  }
+  return outliers
+}
+
+/**
+ * Replace elevation / slope numbers in an AI-written description with the
+ * real values from the terrain grid. Keeps the AI's prose voice but cleans
+ * up the obvious lies (e.g. "6,959 ft bench" on flat ground near a road).
+ */
+function correctDescriptionText(
+  desc: string | undefined,
+  real: { elevationFt: string; slope: number },
+): string {
+  if (!desc) return ''
+  let out = desc
+
+  // Elevation: "9,500 ft" / "9500ft" / "6,959 feet" / "10400 feet"
+  const elevPattern = /\b\d{1,2}[,.]?\d{3}\s*(?:ft|feet)\b/gi
+  out = out.replace(elevPattern, `${real.elevationFt} ft`)
+
+  // Slope: "18° slope" / "25-degree slope" / "30° sidehill" / "10°" when near "slope"
+  const slopeAnnotated = /\b\d{1,2}\s*(?:°|deg(?:rees?)?)\s*(?:slope|sidehill|grade|pitch)?\b/gi
+  out = out.replace(slopeAnnotated, `${Math.round(real.slope)}°`)
+
+  return out
 }
 
 /**
@@ -271,11 +355,12 @@ PLACEMENT RULES:
 2. ALL POIs must be >5 miles from any town, village, hamlet, or settlement.
 3. Use REAL coordinates from detected terrain features and OSM data — do not invent locations.
 4. NEVER place near buildings or developed areas.
-4. Match POI type to real terrain: "meadow" ONLY on mapped meadows, "drainage" ONLY at real drainage points, "saddle" ONLY at detected saddles, "spring" ONLY near confirmed water.
-5. Descriptions MUST reference actual elevation, slope angle, aspect, and specific tactical advice for the current season + time of day.
-6. For "${timeOfDay}" specifically: focus POIs on the behaviors with the highest weights for this time window.
+5. Match POI type to real terrain: "meadow" ONLY on mapped meadows, "drainage" ONLY at real drainage points, "saddle" ONLY at detected saddles, "spring" ONLY near confirmed water.
+6. Descriptions MUST reference actual elevation, slope angle, aspect, and specific tactical advice for the current season + time of day.
+7. For "${timeOfDay}" specifically: focus POIs on the behaviors with the highest weights for this time window.
+8. NEVER place POIs in a straight line, evenly-spaced row, or regular grid pattern. Real elk terrain is irregular — POIs should follow the natural shape of drainages, ridgelines, and meadow edges, never share the same latitude or longitude, and never be uniformly spaced. If two POIs would land within ~150m of each other, drop one. If you cannot find enough genuinely distinct terrain features, return FEWER POIs rather than fabricating positions to fill the area.
 
-Generate up to 20 points of interest. Only generate POIs where the terrain genuinely supports the behavior — if the area lacks suitable terrain for a behavior, generate fewer or zero POIs for it. Quality over quantity. Coordinates STRICTLY WITHIN bounds.
+Generate up to 20 points of interest. Only generate POIs where the terrain genuinely supports the behavior — if the area lacks suitable terrain for a behavior, generate fewer or zero POIs for it. Quality over quantity. Coordinates STRICTLY WITHIN bounds. Empty arrays are acceptable when terrain doesn't support a behavior — DO NOT pad with grid-pattern POIs.
 
 POI types: meadow, drainage, wallow, saddle, spring, bench
 Behaviors: feeding, water, bedding, wallows, travel, security
@@ -320,6 +405,13 @@ export async function generatePOIs(req: Request, res: Response) {
   if (heightM > MAX_SIDE_METERS || widthM > MAX_SIDE_METERS) {
     res.status(400).json({
       error: `Area too large (${(widthM / 1609.34).toFixed(2)} mi × ${(heightM / 1609.34).toFixed(2)} mi). Zoom in to 5 mi × 5 mi or smaller.`
+    })
+    return
+  }
+
+  if (!isInElkRange(bounds)) {
+    res.status(400).json({
+      error: 'Selected area is outside known elk range. Pick an area in the Rocky Mountains, Pacific Northwest, or a known reintroduction pocket.'
     })
     return
   }
@@ -463,10 +555,22 @@ ${features.join('\n')}
 
           // Server-side buffer enforcement
           const townBufferMeters = 5 * METERS_PER_MILE // 5 miles from any town
+          // Minimum effective road buffer regardless of user slider setting.
+          // OSM coverage is incomplete (forest roads often missing), so we need
+          // a safety margin even when the user picks a small value.
+          const MIN_ROAD_BUFFER_METERS = 0.25 * METERS_PER_MILE // 400m
+          const effectiveRoadBuffer = Math.max(bufferMeters, MIN_ROAD_BUFFER_METERS)
           const filteredPois = rawPois.filter((poi: { lat: number; lng: number; name?: string }) => {
+            // Bounds check — reject POIs the AI placed outside the analysis box
+            if (
+              poi.lat < bounds.south || poi.lat > bounds.north ||
+              poi.lng < bounds.west  || poi.lng > bounds.east
+            ) {
+              return false
+            }
             // Road/trail buffer
             if (roadTrailSegments.length > 0) {
-              if (isNearRoadOrTrail(poi.lat, poi.lng, roadTrailSegments, bufferMeters)) {
+              if (isNearRoadOrTrail(poi.lat, poi.lng, roadTrailSegments, effectiveRoadBuffer)) {
                 return false
               }
             }
@@ -504,8 +608,33 @@ ${features.join('\n')}
             }
           })
 
-          console.log(`  ${key}: ${rawPois.length} generated, ${verifiedPois.length} passed buffer (verified terrain)`)
-          return { key, pois: verifiedPois }
+          // ── Type-vs-terrain + hidden-road sanity checks ──
+          const terrainSanePois = verifiedPois.filter((poi) => {
+            if (!terrainMatchesType(poi.type, poi.slope)) return false
+            if (looksLikeHiddenRoad(poi.slope, poi.elevation, elevGrid.minElevation)) return false
+            return true
+          })
+
+          // ── Grid/line-pattern detection: drop colinear clusters ──
+          const gridOutliers = findGridOutliers(terrainSanePois)
+          const nonGridPois = terrainSanePois.filter((_, i) => !gridOutliers.has(i))
+
+          // ── Fix up AI-written descriptions so their numbers match reality ──
+          const correctedPois = nonGridPois.map((poi) => ({
+            ...poi,
+            description: correctDescriptionText(poi.description, {
+              elevationFt: poi.elevationFt,
+              slope: poi.slope,
+            }),
+          }))
+
+          const rejTerrain = verifiedPois.length - terrainSanePois.length
+          const rejGrid = terrainSanePois.length - nonGridPois.length
+          console.log(
+            `  ${key}: ${rawPois.length} gen → ${filteredPois.length} buf → ${terrainSanePois.length} terr → ${nonGridPois.length} final` +
+            (rejTerrain > 0 || rejGrid > 0 ? ` (-${rejTerrain} terrain, -${rejGrid} grid)` : '')
+          )
+          return { key, pois: correctedPois }
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err)
           console.error(`Combo ${key} failed: ${message}`)

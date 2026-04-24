@@ -5,18 +5,43 @@ import { useMapStore, type BaseLayer } from '@/stores/map'
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string
 
 interface LayerDef {
-  style: string
+  url: string
+  attribution: string
+  tileSize: number
+  zoomOffset: number
+  maxZoom: number
+  maxNativeZoom?: number
   opacity?: number
 }
 
-const layerDefs: Record<BaseLayer, LayerDef[]> = {
-  streets: [{ style: 'mapbox/streets-v12' }],
-  satellite: [{ style: 'mapbox/satellite-v9' }],
-  outdoors: [{ style: 'mapbox/outdoors-v12' }],
-  hybrid: [{ style: 'joshforcier/cmnyygiw9006x01qv8bpg574v' }],
+function mapboxLayer(style: string, opacity?: number): LayerDef {
+  return {
+    url: `https://api.mapbox.com/styles/v1/${style}/tiles/512/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
+    attribution: '&copy; <a href="https://www.mapbox.com/">Mapbox</a>',
+    tileSize: 512,
+    zoomOffset: -1,
+    maxZoom: 22,
+    opacity,
+  }
 }
-function tileUrl(style: string): string {
-  return `https://api.mapbox.com/styles/v1/${style}/tiles/512/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`
+
+const layerDefs: Record<BaseLayer, LayerDef[]> = {
+  streets: [mapboxLayer('mapbox/streets-v12')],
+  satellite: [mapboxLayer('mapbox/satellite-v9')],
+  outdoors: [mapboxLayer('mapbox/outdoors-v12')],
+  hybrid: [mapboxLayer('joshforcier/cmnyygiw9006x01qv8bpg574v')],
+  // USGS 3DEP LIDAR-derived shaded relief — ~1m resolution over most of the
+  // US West. Reveals benches, drainages, and blowdown hidden under canopy.
+  // USGS caps native tiles at zoom 16; we allow rendering beyond that so
+  // Leaflet up-samples the z16 tiles instead of going blank.
+  lidar: [{
+    url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSShadedReliefOnly/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Shaded relief &copy; <a href="https://www.usgs.gov/">USGS 3DEP</a>',
+    tileSize: 256,
+    zoomOffset: 0,
+    maxZoom: 22,
+    maxNativeZoom: 16,
+  }],
 }
 
 export function useMap(containerRef: Ref<HTMLElement | null>) {
@@ -31,12 +56,13 @@ export function useMap(containerRef: Ref<HTMLElement | null>) {
     currentTileLayers = []
 
     for (const def of layerDefs[layer]) {
-      const tl = L.tileLayer(tileUrl(def.style), {
-        tileSize: 512,
-        zoomOffset: -1,
-        maxZoom: 22,
+      const tl = L.tileLayer(def.url, {
+        tileSize: def.tileSize,
+        zoomOffset: def.zoomOffset,
+        maxZoom: def.maxZoom,
+        maxNativeZoom: def.maxNativeZoom,
         opacity: def.opacity ?? 1,
-        attribution: '&copy; <a href="https://www.mapbox.com/">Mapbox</a>',
+        attribution: def.attribution,
       })
       tl.addTo(instance)
       currentTileLayers.push(tl)

@@ -9,7 +9,7 @@ export type SidebarTab = 'controls' | 'pois'
 
 export type HuntingPressure = 'low' | 'medium' | 'high'
 
-export type BaseLayer = 'streets' | 'satellite' | 'outdoors' | 'hybrid'
+export type BaseLayer = 'streets' | 'satellite' | 'outdoors' | 'hybrid' | 'lidar'
 
 export const useMapStore = defineStore('map', () => {
   // Map view state — centered on Flat Tops, CO

@@ -11,15 +11,19 @@ import {
   type EnabledLayers,
 } from './usePoiGrading'
 
-// Switched from inline SVG to Material Icons text glyphs because they render
-// reliably as font characters (no parsing/SVG-attribute quirks). The
-// `material-icons` font is loaded globally via @quasar/extras.
+// Unicode geometric characters — rendered in the system font (no external
+// font dependency, no ligature substitution, always available). Each is
+// visually distinct so a hunter can recognize the behavior at a glance.
+// Material Icons text glyphs — semantic icons that match what each behavior
+// represents. The Material Icons font is loaded globally via @quasar/extras;
+// .poi-hex-glyph CSS provides the ligature substitution so text like "grass"
+// resolves to the actual icon glyph.
 const glyphIcon: Record<BehaviorLayer, string> = {
-  feeding: 'eco', // leaf
+  feeding: 'grass',
   water: 'water_drop',
   bedding: 'bedtime', // crescent moon
-  wallows: 'radio_button_checked', // dot inside concentric circles
-  travel: 'compare_arrows', // bidirectional arrows
+  wallows: 'lens_blur', // soft concentric blur — wallow / mud puddle
+  travel: 'compare_arrows',
   security: 'shield',
 }
 
@@ -46,9 +50,9 @@ function buildHexHtml(
 ): string {
   const color = behaviorColors[dom]
   const gc = gradeColor(gradeLetter as never)
-  // On top POIs the hex interior is tinted with the behavior color, so the
-  // glyph would blend in if drawn in the same color. Force white for contrast.
-  const glyphColor = isTop ? '#ffffff' : color
+  const glyphColor = '#ffffff'
+  // All hexes use the same translucent behavior-color fill regardless of grade.
+  // The inner ring is kept as a subtle marker for top-grade (A/A+) POIs only.
   const innerRing = isTop
     ? `<polygon points="17,5 29,12 29,26 17,33 5,26 5,12" fill="none" stroke="${color}" stroke-width="0.8" stroke-opacity="0.5"/>`
     : ''
@@ -57,8 +61,8 @@ function buildHexHtml(
   <div class="poi-hex" style="--c:${color}; --gc:${gc}">
     <svg class="poi-hex-shape" width="34" height="38" viewBox="0 0 34 38">
       <polygon points="17,2 32,10.5 32,27.5 17,36 2,27.5 2,10.5"
-        fill="${isTop ? color : 'rgba(10,14,20,0.92)'}"
-        fill-opacity="${isTop ? 0.18 : 1}"
+        fill="${color}"
+        fill-opacity="0.18"
         stroke="${color}" stroke-width="1.5"/>
       ${innerRing}
     </svg>

@@ -53,10 +53,12 @@ export async function fetchLandData(bounds: {
   const query = `
 [out:json][timeout:60][maxsize:10485760];
 (
-  // Roads (paved/unpaved)
-  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track)$"](${bbox});
-  // Trails and paths
-  way["highway"~"^(path|footway|bridleway|cycleway)$"](${bbox});
+  // ALL highway=* tags — covers roads, tracks, service roads, unclassified,
+  // link ramps, living_street, pedestrian, busway, raceway, and the generic
+  // "road" tag used for poorly-classified backcountry/forest service roads.
+  // Trails (path|footway|bridleway|cycleway) are separated downstream in
+  // categorizeElements().
+  way["highway"](${bbox});
   // Buildings
   way["building"](${bbox});
   // Water bodies

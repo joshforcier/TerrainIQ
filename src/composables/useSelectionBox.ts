@@ -2,7 +2,7 @@ import { ref, watch, onUnmounted, type ShallowRef } from 'vue'
 import L from 'leaflet'
 
 // Box size in miles
-const BOX_MILES = 5
+const BOX_MILES = 2
 
 const MILE_LAT = 1 / 69.0
 function mileLng(lat: number): number {

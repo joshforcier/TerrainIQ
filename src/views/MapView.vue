@@ -9,6 +9,7 @@ import type L from 'leaflet'
 import type { HoverScores } from '@/composables/useHoverInfo'
 import { useMapStore, type BaseLayer } from '@/stores/map'
 import { downloadGpx } from '@/utils/exportGpx'
+import { isInElkRange } from '@/utils/elkRange'
 import type { PointOfInterest } from '@/data/pointsOfInterest'
 
 const mapStore = useMapStore()
@@ -18,9 +19,15 @@ const baseLayerOptions: { label: string; value: BaseLayer; icon: string }[] = [
   { label: 'Satellite', value: 'satellite', icon: 'satellite_alt' },
   { label: 'Outdoors', value: 'outdoors', icon: 'terrain' },
   { label: 'Hybrid', value: 'hybrid', icon: 'layers' },
+  { label: 'LIDAR', value: 'lidar', icon: 'landscape' },
 ]
 
 const mapContainerRef = ref<InstanceType<typeof MapContainer> | null>(null)
+const stepperCollapsed = ref(false)
+
+function toggleStepper() {
+  stepperCollapsed.value = !stepperCollapsed.value
+}
 
 const hoverScores = computed<HoverScores | null>(() => {
   return mapContainerRef.value?.hoverScores ?? null
@@ -39,6 +46,13 @@ const mapInstance = computed<L.Map | null>(() => (mapContainerRef.value?.map as 
 // the top level of the exposed surface, so we have to read `.value` explicitly here.
 const selectionActive = computed(() => mapContainerRef.value?.selection?.isActive?.value ?? false)
 const selectionLocked = computed(() => mapContainerRef.value?.selection?.isLocked?.value ?? false)
+const selectionBounds = computed(() => mapContainerRef.value?.selection?.bounds?.value ?? null)
+
+const selectionOutsideElkRange = computed(() => {
+  const b = selectionBounds.value
+  if (!b) return false
+  return !isInElkRange(b)
+})
 
 type Mode = 'idle' | 'selecting' | 'placed' | 'analyzing' | 'done'
 
@@ -86,6 +100,17 @@ function exportGpx() {
     pressure: mapStore.huntingPressure,
   })
 }
+
+function clearKept() {
+  // resetAll archives the current active POIs into keptPois as part of its
+  // reset, so we have to clear keptPois AFTER, not before — otherwise we
+  // just re-populate the array we were trying to empty.
+  mapStore.clearDeletedPois()
+  mapContainerRef.value?.resetAll()
+  mapStore.clearKeptPois()
+}
+
+const keptCount = computed(() => mapStore.keptPois.length)
 </script>
 
 <template>
@@ -97,7 +122,7 @@ function exportGpx() {
     <PoiHoverCard :map="mapInstance" />
 
     <!-- Stepper panel -->
-    <div class="stepper-card">
+    <div class="stepper-card" :class="{ 'stepper-card--collapsed': stepperCollapsed }">
       <div class="stepper-track">
         <div class="step" :class="{ 'step--active': isStepActive(1), 'step--done': isStepDone(1) }">
           <span class="step-num">
@@ -119,11 +144,19 @@ function exportGpx() {
           <span class="step-num">3</span>
           <span class="step-label">Done</span>
         </div>
+        <button
+          class="stepper-collapse-btn"
+          @click="toggleStepper"
+          :title="stepperCollapsed ? 'Expand' : 'Collapse'"
+          :aria-label="stepperCollapsed ? 'Expand stepper' : 'Collapse stepper'"
+        >
+          <q-icon :name="stepperCollapsed ? 'expand_more' : 'expand_less'" size="16px" />
+        </button>
       </div>
 
-      <div class="stepper-body">
+      <div v-show="!stepperCollapsed" class="stepper-body">
         <template v-if="mode === 'idle'">
-          <p class="step-caption">Pick a 5 × 5 mi area to analyze.</p>
+          <p class="step-caption">Pick a 2 × 2 mi area to analyze.</p>
           <button class="map-btn map-btn--primary" @click="startSelection">
             <q-icon name="crop_free" size="18px" />
             <span>Select Area</span>
@@ -141,8 +174,21 @@ function exportGpx() {
         </template>
 
         <template v-else-if="mode === 'placed'">
-          <p class="step-caption">Box placed. Ready to analyze.</p>
-          <button class="map-btn map-btn--primary" @click="analyzeArea">
+          <template v-if="selectionOutsideElkRange">
+            <p class="step-caption step-caption--warn">
+              <q-icon name="block" size="14px" />
+              Outside elk range.
+            </p>
+            <p class="step-caption-hint">
+              Pick an area in the Rocky Mountains, Pacific Northwest, or a known reintroduction pocket (PA, KY, TN, MI, WI, AR, NC).
+            </p>
+          </template>
+          <p v-else class="step-caption">Box placed. Ready to analyze.</p>
+          <button
+            class="map-btn map-btn--primary"
+            :disabled="selectionOutsideElkRange"
+            @click="analyzeArea"
+          >
             <q-icon name="auto_awesome" size="18px" />
             <span>Analyze Area</span>
           </button>
@@ -184,6 +230,17 @@ function exportGpx() {
             New Selection
           </button>
         </template>
+
+        <!-- Dev reset — wipes active analysis, kept POIs, deleted list, and selection -->
+        <div v-if="keptCount > 0 || hasResults || selectionLocked || selectionActive" class="kept-pois-row">
+          <span class="kept-pois-label">
+            <template v-if="keptCount > 0">{{ keptCount }} saved POI{{ keptCount === 1 ? '' : 's' }}</template>
+            <template v-else>reset map state</template>
+          </span>
+          <button class="kept-pois-clear" @click="clearKept" title="Clear everything: analysis, selection, saved POIs, deleted POIs">
+            Clear All
+          </button>
+        </div>
       </div>
     </div>
 
@@ -240,7 +297,7 @@ function exportGpx() {
   top: 12px;
   right: 12px;
   z-index: 1000;
-  width: 280px;
+  width: 320px;
   background: rgba(15, 25, 35, 0.92);
   backdrop-filter: blur(12px);
   border: 1px solid #1e2d3d;
@@ -250,10 +307,11 @@ function exportGpx() {
 }
 
 .stepper-track {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 14px;
+  padding: 12px 44px 12px 14px; /* extra right padding reserves space for the collapse button */
   border-bottom: 1px solid #1e2d3d;
   background: rgba(10, 14, 20, 0.5);
 }
@@ -323,6 +381,33 @@ function exportGpx() {
   background: #1e2d3d;
 }
 
+.stepper-collapse-btn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #6b7c8d;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.stepper-collapse-btn:hover {
+  background: rgba(200, 214, 229, 0.08);
+  color: #c8d6e5;
+}
+
+.stepper-card--collapsed .stepper-track {
+  border-bottom: none;
+}
+
 .stepper-body {
   padding: 14px;
   display: flex;
@@ -346,6 +431,20 @@ function exportGpx() {
   animation: pulse-text 1.5s ease-in-out infinite;
 }
 
+.step-caption--warn {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+.map-btn--primary:disabled {
+  background: rgba(232, 197, 71, 0.25);
+  color: #0a0e14;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+  opacity: 0.5;
+}
+
 .step-caption-hint {
   margin: -4px 0 4px;
   font-size: 11px;
@@ -363,6 +462,42 @@ function exportGpx() {
   font-weight: 500;
   color: #5d6e80;
   line-height: 1.4;
+}
+
+.kept-pois-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid #1e2d3d;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #6b7c8d;
+}
+
+.kept-pois-label {
+  letter-spacing: 0.02em;
+}
+
+.kept-pois-clear {
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.06);
+  color: #ef4444;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.kept-pois-clear:hover {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.45);
 }
 
 .cache-badge {
