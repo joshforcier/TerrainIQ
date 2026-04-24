@@ -143,6 +143,21 @@ function deletePoi() {
         <p class="notes-body">{{ mapStore.pinnedPoi.description }}</p>
       </section>
 
+      <section
+        v-if="mapStore.pinnedPoi.reasoningWhyHere || mapStore.pinnedPoi.reasoningWhyNotElsewhere"
+        class="reasoning-section"
+      >
+        <div class="section-header">AI Terrain Reasoning</div>
+        <div v-if="mapStore.pinnedPoi.reasoningWhyHere" class="reasoning-row">
+          <div class="reasoning-label">Why this spot</div>
+          <p class="reasoning-body">{{ mapStore.pinnedPoi.reasoningWhyHere }}</p>
+        </div>
+        <div v-if="mapStore.pinnedPoi.reasoningWhyNotElsewhere" class="reasoning-row">
+          <div class="reasoning-label">Why not nearby options</div>
+          <p class="reasoning-body">{{ mapStore.pinnedPoi.reasoningWhyNotElsewhere }}</p>
+        </div>
+      </section>
+
       <div class="poi-actions">
         <button class="delete-btn" @click="deletePoi" title="Hide this POI from the map">
           <q-icon name="delete_outline" size="14px" />
@@ -435,6 +450,32 @@ function deletePoi() {
   font-size: 12.5px;
   color: var(--fg-1, #c8d6e5);
   line-height: 1.55;
+}
+
+.reasoning-section {
+  padding: 14px 16px 6px;
+  border-top: 1px solid var(--bd-0, #1a2735);
+}
+
+.reasoning-row + .reasoning-row {
+  margin-top: 10px;
+}
+
+.reasoning-label {
+  font-family: var(--mono, 'JetBrains Mono', monospace);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--fg-3, #556676);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.reasoning-body {
+  margin: 0 0 8px;
+  color: var(--fg-1, #c8d6e5);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 /* ─── Actions ─── */

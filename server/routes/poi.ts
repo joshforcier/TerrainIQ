@@ -374,7 +374,9 @@ Respond with ONLY valid JSON:
       "lng": number,
       "type": "meadow|drainage|wallow|saddle|spring|bench",
       "relatedBehaviors": ["feeding", "water", etc - only behaviors relevant to this season],
-      "description": "string - 2-3 sentences: what the terrain is, why elk use it this season/time, and specific tactical hunting advice (where to set up, wind direction, approach)"
+      "description": "string - 2-3 sentences: what the terrain is, why elk use it this season/time, and specific tactical hunting advice (where to set up, wind direction, approach)",
+      "reasoningWhyHere": "string - 1-2 sentences explaining why this exact coordinate/feature was chosen over nearby terrain",
+      "reasoningWhyNotElsewhere": "string - 1 sentence explaining what nearby terrain looked tempting but was rejected and why"
     }
   ]
 }`
@@ -626,6 +628,8 @@ ${features.join('\n')}
               elevationFt: poi.elevationFt,
               slope: poi.slope,
             }),
+            reasoningWhyHere: typeof poi.reasoningWhyHere === 'string' ? poi.reasoningWhyHere.trim() : '',
+            reasoningWhyNotElsewhere: typeof poi.reasoningWhyNotElsewhere === 'string' ? poi.reasoningWhyNotElsewhere.trim() : '',
           }))
 
           const rejTerrain = verifiedPois.length - terrainSanePois.length

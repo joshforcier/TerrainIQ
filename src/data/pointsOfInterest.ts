@@ -13,6 +13,10 @@ export interface PointOfInterest {
   elevationFt?: string
   slope?: number
   aspect?: string
+  /** AI explanation for why this exact location was selected. */
+  reasoningWhyHere?: string
+  /** AI explanation for why nearby alternatives were rejected. */
+  reasoningWhyNotElsewhere?: string
 }
 
 export const poiTypeLabels: Record<PointOfInterest['type'], string> = {
