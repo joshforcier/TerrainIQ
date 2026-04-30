@@ -4,6 +4,7 @@ import 'leaflet.heat'
 import { useMapStore } from '@/stores/map'
 import { generateTerrainGrid, computeCellScore, type TerrainCell } from '@/data/terrainGrid'
 import type { AnalyzedArea } from '@/composables/useAIPois'
+import type { BehaviorLayer } from '@/data/elkBehavior'
 
 // Higher grid density = more defined hotspots instead of uniform wash
 const GRID_SIZE = 80
@@ -33,9 +34,12 @@ export function useHeatmap(
   }
 
   function buildHeatData(): Array<[number, number, number]> {
+    const activeBehaviors: BehaviorLayer[] = mapStore.huntingPressure === 'max'
+      ? ['security']
+      : mapStore.activeBehaviors
     const points = terrainCells.value
       .map(cell => {
-        const score = computeCellScore(cell, mapStore.activeBehaviors, mapStore.currentWeights)
+        const score = computeCellScore(cell, activeBehaviors, mapStore.currentWeights)
         return [cell.lat, cell.lng, score] as [number, number, number]
       })
       .filter(point => point[2] > 0.25) // Higher threshold — only real hotspots
@@ -96,6 +100,7 @@ export function useHeatmap(
     () => [
       mapStore.season,
       mapStore.timeOfDay,
+      mapStore.huntingPressure,
       [...mapStore.activeBehaviors],
       mapStore.intensity,
       mapStore.showHeatmap,

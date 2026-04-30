@@ -1,7 +1,12 @@
 import type { Response } from 'express'
 import type { AuthedRequest } from '../middleware/auth.js'
-import { fetchElevationGrid } from '../services/elevation.js'
-import { computeSlopeAspect, inspectTerrainAt } from '../services/terrainAnalysis.js'
+import {
+  DEFAULT_INSPECTION_CELL_SPACING_M,
+  DEFAULT_INSPECTION_GRID_SIZE,
+  inspectTerrainCoordinate,
+  validateInspectionCoordinate,
+  validateInspectionGridSize,
+} from '../services/terrainInspection.js'
 
 /**
  * Dev-only diagnostic: given a single lat/lng, fetch a small elevation
@@ -24,7 +29,9 @@ export async function inspectPoint(req: AuthedRequest, res: Response) {
     res.status(400).json({ error: 'Missing lat/lng (numbers required)' })
     return
   }
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+  try {
+    validateInspectionCoordinate(lat, lng)
+  } catch (err) {
     res.status(400).json({ error: 'lat/lng out of valid range' })
     return
   }
@@ -33,44 +40,18 @@ export async function inspectPoint(req: AuthedRequest, res: Response) {
   // saddle search radius (15 cells). 200m sampling captures sharp peaks
   // that 400m would smooth over via bilinear interpolation; 3km reach is
   // local-enough to avoid catching regional cross-valley topology.
-  const spacing = cellSpacingM ?? 200
-  const size = gridSize ?? 31
-  if (size < 31 || size > 71) {
+  const spacing = cellSpacingM ?? DEFAULT_INSPECTION_CELL_SPACING_M
+  const size = gridSize ?? DEFAULT_INSPECTION_GRID_SIZE
+  try {
+    validateInspectionGridSize(size)
+  } catch (err) {
     res.status(400).json({ error: 'gridSize must be between 31 and 71' })
     return
   }
-  const halfExtent = (size - 1) / 2
-  const latStep = spacing / 111_000
-  const lngStep = spacing / (111_000 * Math.cos((lat * Math.PI) / 180))
-
-  const bounds = {
-    south: lat - halfExtent * latStep,
-    north: lat + halfExtent * latStep,
-    west: lng - halfExtent * lngStep,
-    east: lng + halfExtent * lngStep,
-  }
 
   try {
-    const elevGrid = await fetchElevationGrid(bounds, size)
-    const terrainPoints = computeSlopeAspect(elevGrid)
-    const inspection = inspectTerrainAt(
-      terrainPoints,
-      elevGrid,
-      halfExtent, // center row
-      halfExtent, // center col
-    )
-    if (!inspection) {
-      res.status(500).json({ error: 'Could not inspect point — center cell out of grid bounds' })
-      return
-    }
-    res.json({
-      ...inspection,
-      meta: {
-        gridSize: size,
-        cellSpacingM: spacing,
-        bounds,
-      },
-    })
+    const result = await inspectTerrainCoordinate(lat, lng, { cellSpacingM: spacing, gridSize: size })
+    res.json({ ...result.inspection, meta: result.meta })
   } catch (err: unknown) {
     console.error('inspectPoint error:', err)
     res.status(500).json({ error: err instanceof Error ? err.message : 'Inspection failed' })

@@ -27,6 +27,8 @@ export interface ElevationGrid {
   avgElevation: number
 }
 
+export type ElevationBounds = { north: number; south: number; east: number; west: number }
+
 const TILE_SIZE = 256
 const MIN_ZOOM = 10
 const MAX_ZOOM = 14
@@ -198,12 +200,13 @@ export async function fetchElevationGridMapbox(
  * answered.
  */
 export async function fetchElevationGrid(
-  bounds: { north: number; south: number; east: number; west: number },
+  bounds: ElevationBounds,
   gridSize = 20,
 ): Promise<ElevationGrid> {
   // Lazy imports keep the Mapbox path free of `geotiff` overhead when
   // analyses are outside US coverage.
   const { isInUSCoverage, fetchElevationGrid3DEP } = await import('./elevation3DEP.js')
+  let usgsFailureMessage: string | null = null
 
   if (isInUSCoverage(bounds)) {
     try {
@@ -214,8 +217,15 @@ export async function fetchElevationGrid(
       return grid
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      usgsFailureMessage = msg
       console.warn(`USGS 3DEP failed, falling back to Mapbox: ${msg}`)
     }
+  }
+
+  if (usgsFailureMessage && !process.env.VITE_MAPBOX_TOKEN) {
+    throw new Error(
+      `USGS 3DEP unavailable (${usgsFailureMessage}); VITE_MAPBOX_TOKEN is not set — required for Mapbox Terrain-RGB fallback elevation data.`,
+    )
   }
 
   const grid = await fetchElevationGridMapbox(bounds, gridSize)
@@ -223,4 +233,20 @@ export async function fetchElevationGrid(
     `Elevation source: Mapbox Terrain-RGB (${grid.minElevation.toFixed(0)}–${grid.maxElevation.toFixed(0)} m)`,
   )
   return grid
+}
+
+export async function fetchElevationRaster(
+  bounds: ElevationBounds,
+  options: { targetPixelSizeMeters?: number; maxSidePixels?: number; maxPixels?: number } = {},
+) {
+  const { isInUSCoverage, fetch3DEPRaster } = await import('./elevation3DEP.js')
+  if (!isInUSCoverage(bounds)) {
+    throw new Error('Native USGS 3DEP raster is only available inside US coverage')
+  }
+
+  const raster = await fetch3DEPRaster(bounds, options)
+  console.log(
+    `Elevation source: USGS 3DEP native raster (${raster.width}x${raster.height}, ~${raster.actualPixelSizeMeters.toFixed(1)}m/pixel, ${(raster.nodataRatio * 100).toFixed(1)}% nodata)`,
+  )
+  return raster
 }

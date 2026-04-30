@@ -14,10 +14,11 @@ import { useSubscriptionStore } from '@/stores/subscription'
 import { useScoutWaypointsStore } from '@/stores/scoutWaypoints'
 import L from 'leaflet'
 import type { HoverScores } from '@/composables/useHoverInfo'
-import { useMapStore, type BaseLayer } from '@/stores/map'
+import { useMapStore, type BaseLayer, type HuntingPressure } from '@/stores/map'
 import { downloadGpx } from '@/utils/exportGpx'
 import { isInElkRange } from '@/utils/elkRange'
 import type { PointOfInterest } from '@/data/pointsOfInterest'
+import type { TimeOfDay } from '@/data/elkBehavior'
 
 const mapStore = useMapStore()
 const userPinsStore = useUserPinsStore()
@@ -76,7 +77,11 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  stopAnalysisTimer()
+  stopViewportListener()
+})
 
 const baseLayerOptions: { label: string; value: BaseLayer; icon: string }[] = [
   { label: 'Streets', value: 'streets', icon: 'map' },
@@ -103,6 +108,63 @@ const aiLoading = computed(() => mapContainerRef.value?.loading ?? false)
 const aiError = computed(() => mapContainerRef.value?.error ?? null)
 const aiErrorCode = computed(() => mapContainerRef.value?.errorCode ?? null)
 
+const analysisStartedAt = ref<number | null>(null)
+const analysisElapsedSeconds = ref(0)
+let analysisTimer: ReturnType<typeof setInterval> | null = null
+
+const analysisPhases = [
+  { icon: 'terrain', label: 'Reading terrain and elevation layers' },
+  { icon: 'water_drop', label: 'Checking water, cover, roads, and burns' },
+  { icon: 'grid_view', label: 'Scoring dawn, midday, and dusk combos' },
+  { icon: 'verified', label: 'Verifying coordinates against real terrain' },
+  { icon: 'route', label: 'Ranking access, pressure, and setup quality' },
+]
+
+const currentAnalysisPhase = computed(() => {
+  const index = Math.min(
+    analysisPhases.length - 1,
+    Math.floor(analysisElapsedSeconds.value / 12),
+  )
+  return analysisPhases[index]
+})
+
+const analysisElapsedLabel = computed(() => {
+  const total = analysisElapsedSeconds.value
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  if (minutes === 0) return `${seconds}s`
+  return `${minutes}m ${seconds.toString().padStart(2, '0')}s`
+})
+
+const analysisPatienceLabel = computed(() => {
+  if (analysisElapsedSeconds.value >= 90) return 'Still working through the full terrain pass.'
+  if (analysisElapsedSeconds.value >= 45) return 'Larger boxes can take a minute or two.'
+  return 'Nine scenarios are being checked before POIs appear.'
+})
+
+function stopAnalysisTimer() {
+  if (analysisTimer) {
+    clearInterval(analysisTimer)
+    analysisTimer = null
+  }
+}
+
+watch(aiLoading, (loading) => {
+  stopAnalysisTimer()
+  if (!loading) {
+    analysisStartedAt.value = null
+    analysisElapsedSeconds.value = 0
+    return
+  }
+
+  analysisStartedAt.value = Date.now()
+  analysisElapsedSeconds.value = 0
+  analysisTimer = setInterval(() => {
+    if (!analysisStartedAt.value) return
+    analysisElapsedSeconds.value = Math.floor((Date.now() - analysisStartedAt.value) / 1000)
+  }, 1000)
+})
+
 // When the analyze endpoint reports a quota exhaustion, surface the
 // dedicated upgrade modal instead of letting the generic error toast linger.
 watch(aiErrorCode, (code) => {
@@ -112,9 +174,95 @@ watch(aiErrorCode, (code) => {
   }
 })
 const hasResults = computed(() => mapContainerRef.value?.hasResults ?? false)
-const aiPoisCount = computed(() => mapContainerRef.value?.pois?.length ?? 0)
 const fromCache = computed(() => mapContainerRef.value?.fromCache ?? false)
 const mapInstance = computed<L.Map | null>(() => (mapContainerRef.value?.map as L.Map | null) ?? null)
+
+const timeOptions: Array<{ label: string; value: TimeOfDay }> = [
+  { label: 'Dawn', value: 'dawn' },
+  { label: 'Midday', value: 'midday' },
+  { label: 'Dusk', value: 'dusk' },
+]
+
+const pressureOptions: Array<{ label: string; value: HuntingPressure }> = [
+  { label: 'Low', value: 'low' },
+  { label: 'Med', value: 'medium' },
+  { label: 'High', value: 'high' },
+  { label: 'Max', value: 'max' },
+]
+
+const viewportVersion = ref(0)
+let stopViewportListener: () => void = () => {}
+
+function comboKey(timeOfDay: TimeOfDay, pressure: HuntingPressure): string {
+  return `${timeOfDay}_${pressure}`
+}
+
+function poiCoordKey(poi: PointOfInterest): string {
+  return `${poi.lat.toFixed(5)},${poi.lng.toFixed(5)}`
+}
+
+function visibleComboCoordSets(): Record<string, Set<string>> {
+  void viewportVersion.value
+  const combos = mapContainerRef.value?.allCombos
+  const map = mapInstance.value
+  if (!combos || !map) return {}
+
+  const bounds = map.getBounds()
+  const result: Record<string, Set<string>> = {}
+  for (const [key, comboPois] of Object.entries(combos)) {
+    const coords = new Set<string>()
+    for (const poi of comboPois) {
+      if (mapStore.deletedPoiIds.has(poi.id)) continue
+      if (!bounds.contains(L.latLng(poi.lat, poi.lng))) continue
+      coords.add(poiCoordKey(poi))
+    }
+    result[key] = coords
+  }
+  return result
+}
+
+const visibleScenarioCounts = computed<Record<string, number>>(() => {
+  const sets = visibleComboCoordSets()
+  const counts: Record<string, number> = {}
+  for (const [key, coords] of Object.entries(sets)) {
+    counts[key] = coords.size
+  }
+  return counts
+})
+
+const aiPoisCount = computed(() => {
+  const uniqueCoords = new Set<string>()
+  for (const coords of Object.values(visibleComboCoordSets())) {
+    for (const coord of coords) uniqueCoords.add(coord)
+  }
+  return uniqueCoords.size
+})
+
+function scenarioCount(timeOfDay: TimeOfDay, pressure: HuntingPressure): number {
+  return visibleScenarioCounts.value[comboKey(timeOfDay, pressure)] ?? 0
+}
+
+function scenarioIsActive(timeOfDay: TimeOfDay, pressure: HuntingPressure): boolean {
+  if (pressure === 'max' && mapStore.huntingPressure === 'max') return true
+  return mapStore.timeOfDay === timeOfDay && mapStore.huntingPressure === pressure
+}
+
+function selectScenario(timeOfDay: TimeOfDay, pressure: HuntingPressure) {
+  mapStore.setTimeOfDay(timeOfDay)
+  mapStore.setHuntingPressure(pressure)
+}
+
+watch(mapInstance, (map) => {
+  stopViewportListener()
+  if (!map) return
+  const updateViewport = () => { viewportVersion.value++ }
+  map.on('moveend zoomend', updateViewport)
+  updateViewport()
+  stopViewportListener = () => {
+    map.off('moveend zoomend', updateViewport)
+    stopViewportListener = () => {}
+  }
+}, { immediate: true })
 
 // `selection` is an object exposed via defineExpose — Vue only auto-unwraps refs at
 // the top level of the exposed surface, so we have to read `.value` explicitly here.
@@ -388,16 +536,29 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-else-if="mode === 'analyzing'">
-          <p class="step-caption step-caption--pulse">
-            <q-spinner-dots color="amber" size="16px" />
-            Analyzing all combos...
-          </p>
+          <div class="analysis-loader" role="status" aria-live="polite">
+            <div class="analysis-loader__topline">
+              <span class="analysis-loader__signal" aria-hidden="true">
+                <q-spinner-dots color="amber" size="18px" />
+              </span>
+              <span class="analysis-loader__title">Analyzing elk scenarios</span>
+              <span class="analysis-loader__time">{{ analysisElapsedLabel }}</span>
+            </div>
+            <div class="analysis-loader__phase">
+              <q-icon :name="currentAnalysisPhase.icon" size="14px" />
+              <span>{{ currentAnalysisPhase.label }}</span>
+            </div>
+            <div class="analysis-loader__meter" aria-hidden="true">
+              <span></span>
+            </div>
+            <p class="analysis-loader__hint">{{ analysisPatienceLabel }}</p>
+          </div>
         </template>
 
         <template v-else-if="mode === 'done'">
           <p class="step-caption">
             <q-icon name="auto_awesome" size="14px" color="amber" />
-            <strong>{{ aiPoisCount }}</strong>&nbsp;POIs
+            <strong>{{ aiPoisCount }}</strong>&nbsp;visible POIs
             <span v-if="fromCache" class="cache-badge">
               <q-icon name="bookmark" size="10px" />Saved
             </span>
@@ -405,8 +566,38 @@ onBeforeUnmount(() => {
           <p class="step-caption-hint">
             {{ fromCache
               ? 'Loaded from a previous analysis of this area.'
-              : 'Change time/pressure on the sidebar to update.' }}
+              : 'Counts reflect the current map view.' }}
           </p>
+          <div class="scenario-matrix" aria-label="Visible POIs by time of day and hunting pressure">
+            <div class="scenario-matrix__label">Visible by scenario</div>
+            <div class="scenario-matrix__grid">
+              <div class="scenario-matrix__corner" aria-hidden="true"></div>
+              <div
+                v-for="pressure in pressureOptions"
+                :key="pressure.value"
+                class="scenario-matrix__head"
+              >
+                {{ pressure.label }}
+              </div>
+              <template v-for="time in timeOptions" :key="time.value">
+                <div class="scenario-matrix__row-label">{{ time.label }}</div>
+                <button
+                  v-for="pressure in pressureOptions"
+                  :key="`${time.value}-${pressure.value}`"
+                  type="button"
+                  class="scenario-matrix__cell"
+                  :class="{
+                    'scenario-matrix__cell--active': scenarioIsActive(time.value, pressure.value),
+                    'scenario-matrix__cell--empty': scenarioCount(time.value, pressure.value) === 0,
+                  }"
+                  :aria-label="`${time.label} ${pressure.label}: ${scenarioCount(time.value, pressure.value)} visible POIs`"
+                  @click="selectScenario(time.value, pressure.value)"
+                >
+                  {{ scenarioCount(time.value, pressure.value) || '-' }}
+                </button>
+              </template>
+            </div>
+          </div>
           <p class="step-disclaimer">
             High-probability terrain for the selected season, time, and pressure.
           </p>
@@ -756,6 +947,97 @@ onBeforeUnmount(() => {
   animation: pulse-text 1.5s ease-in-out infinite;
 }
 
+.analysis-loader {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(232, 197, 71, 0.22);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(232, 197, 71, 0.09), rgba(12, 18, 25, 0.32));
+}
+
+.analysis-loader__topline {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.analysis-loader__signal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(232, 197, 71, 0.12);
+}
+
+.analysis-loader__title {
+  min-width: 0;
+  color: #f1d66b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.analysis-loader__time {
+  color: #9fb0c2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-loader__phase {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+  color: #c8d6e5;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.analysis-loader__phase .q-icon {
+  color: #e8c547;
+  flex: 0 0 auto;
+}
+
+.analysis-loader__meter {
+  position: relative;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(200, 214, 229, 0.1);
+}
+
+.analysis-loader__meter span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -45%;
+  width: 45%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, #e8c547, transparent);
+  animation: analysis-scan 1.45s ease-in-out infinite;
+}
+
+.analysis-loader__hint {
+  margin: 0;
+  color: #75889b;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
 .step-caption--warn {
   color: #ef4444;
   font-weight: 600;
@@ -776,6 +1058,101 @@ onBeforeUnmount(() => {
   font-weight: 500;
   color: #6b7c8d;
   line-height: 1.4;
+}
+
+.scenario-matrix {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 2px 0 4px;
+  padding: 9px;
+  border: 1px solid #1e2d3d;
+  border-radius: 8px;
+  background: rgba(8, 13, 20, 0.42);
+}
+
+.scenario-matrix__label {
+  color: #8293a5;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.scenario-matrix__grid {
+  display: grid;
+  grid-template-columns: 48px repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  align-items: center;
+}
+
+.scenario-matrix__corner {
+  height: 20px;
+}
+
+.scenario-matrix__head,
+.scenario-matrix__row-label {
+  color: #708295;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.scenario-matrix__head {
+  text-align: center;
+}
+
+.scenario-matrix__row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scenario-matrix__cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(232, 197, 71, 0.18);
+  border-radius: 6px;
+  background: rgba(232, 197, 71, 0.08);
+  color: #f1d66b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, box-shadow 0.12s;
+}
+
+.scenario-matrix__cell:hover {
+  background: rgba(232, 197, 71, 0.14);
+  border-color: rgba(232, 197, 71, 0.42);
+}
+
+.scenario-matrix__cell--active {
+  border-color: #e8c547;
+  box-shadow: 0 0 0 2px rgba(232, 197, 71, 0.16);
+}
+
+.scenario-matrix__cell--empty {
+  border-color: rgba(200, 214, 229, 0.08);
+  background: rgba(200, 214, 229, 0.035);
+  color: #4f6072;
+}
+
+.scenario-matrix__cell--empty:hover {
+  background: rgba(200, 214, 229, 0.07);
+  border-color: rgba(200, 214, 229, 0.16);
+  color: #7a8da0;
+}
+
+.scenario-matrix__cell--active.scenario-matrix__cell--empty {
+  border-color: rgba(232, 197, 71, 0.65);
+  color: #e8c547;
 }
 
 .step-disclaimer {
@@ -1068,6 +1445,11 @@ onBeforeUnmount(() => {
 @keyframes pulse-text {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
+}
+
+@keyframes analysis-scan {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(322%); }
 }
 
 /* ─── Map Buttons ─── */

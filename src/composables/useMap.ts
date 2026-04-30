@@ -31,7 +31,14 @@ function mapboxLayer(style: string, opacity?: number): LayerDef {
 const layerDefs: Record<BaseLayer, LayerDef[]> = {
   streets: [mapboxLayer('mapbox/streets-v12')],
   satellite: [mapboxLayer('mapbox/satellite-v9')],
-  outdoors: [mapboxLayer('mapbox/outdoors-v12')],
+  outdoors: [{
+    url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Topo &copy; <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map">USGS The National Map</a>',
+    tileSize: 256,
+    zoomOffset: 0,
+    maxZoom: 22,
+    maxNativeZoom: 16,
+  }],
   hybrid: [mapboxLayer('joshforcier/cmnyygiw9006x01qv8bpg574v')],
   // USGS 3DEP LIDAR-derived shaded relief. The cached `/tile/{z}/{y}/{x}`
   // endpoint advertises deep zoom levels but returns 404 for many normal

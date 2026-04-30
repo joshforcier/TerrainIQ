@@ -7,18 +7,31 @@ import {
   isNearRoadOrTrail,
   haversineMeters,
 } from './overpass.js'
-import { fetchElevationGrid } from '../services/elevation.js'
+import { fetchElevationGrid, fetchElevationRaster } from '../services/elevation.js'
 import {
   analyzeTerrainForPrompt,
   formatFeaturesForPrompt,
   computeSlopeAspect,
   inspectTerrainAt,
+  rasterToElevationGrid,
   type TerrainAnalysis,
   type PointInspection,
   type TerrainPoint,
 } from '../services/terrainAnalysis.js'
 import { isInElkRange } from '../services/elkRange.js'
 import { fetchFireHistory, summarizeFireHistory } from '../services/fireHistory.js'
+import {
+  clipFireHistoryToPolygon,
+  clipLandDataToPolygon,
+  normalizeUnitPolygon,
+  summarizeClipStats,
+  type UnitPolygon,
+} from '../services/geoClip.js'
+import {
+  appendHighResolutionTerrainNote,
+  fetchHighResolutionTerrainMetrics,
+  type HighResolutionTerrainMetrics,
+} from '../services/highResTerrain.js'
 import {
   checkAndIncrementUsage,
   estimateOpenAICostUsd,
@@ -46,13 +59,17 @@ interface GeneratePOIRequest {
   timeOfDay: string
   zoom: number
   bufferMiles?: number
+  unitPolygon?: UnitPolygon
 }
 
 const METERS_PER_MILE = 1609.34
 const DEFAULT_BUFFER_MILES = 0.5
+const MAX_PRESSURE_BUFFER_MILES = 1
+const MAX_PRESSURE_POI_LIMIT = 3
 
 const TIMES = ['dawn', 'midday', 'dusk'] as const
-const PRESSURES = ['low', 'medium', 'high'] as const
+const STANDARD_PRESSURES = ['low', 'medium', 'high'] as const
+const PRESSURES = ['low', 'medium', 'high', 'max'] as const
 const OPENAI_MODEL = 'gpt-5.4-mini'
 
 /**
@@ -100,7 +117,7 @@ function terrainMatchesType(type: string | undefined, slope: number): boolean {
   switch ((type ?? '').toLowerCase()) {
     case 'meadow':       return slope <= 15            // flat to gentle open ground
     case 'wallow':       return slope <= 12            // flat boggy spots
-    case 'bench':        return slope >= 4 && slope <= 12 // a real shelf, not a sidehill
+    case 'bench':        return slope >= 4 && slope < 20 // a real shelf, not a sidehill
     case 'drainage':     return slope >= 4             // drainages run downhill
     case 'saddle':       return slope <= 12            // low point between highs (matches detector slope cap)
     case 'spring':       return slope <= 25            // spring sources
@@ -117,6 +134,50 @@ function terrainMatchesType(type: string | undefined, slope: number): boolean {
  */
 function looksLikeHiddenRoad(slope: number, elevation: number, minElevation: number): boolean {
   return slope < 3 && (elevation - minElevation) < 50
+}
+
+function maxPressurePoiScore(poi: {
+  type?: string
+  slope?: number
+  description?: string
+  reasoningWhyHere?: string
+  reasoningWhyNotElsewhere?: string
+}): number {
+  const typeScore: Record<string, number> = {
+    drainage: 30,
+    'finger-ridge': 28,
+    bench: 26,
+    saddle: 22,
+    ridge: 18,
+  }
+  const normalizedType = (poi.type ?? '').toLowerCase()
+  const slope = Number.isFinite(poi.slope) ? Number(poi.slope) : 0
+  const idealSlope = normalizedType === 'bench' || normalizedType === 'saddle' ? 10 : 32
+  const slopeWindow = normalizedType === 'bench' || normalizedType === 'saddle' ? 14 : 28
+  const slopeScore = Math.max(0, 1 - Math.abs(slope - idealSlope) / slopeWindow) * 25
+  const text = [poi.description, poi.reasoningWhyHere, poi.reasoningWhyNotElsewhere]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  const securityTerms = [
+    'remote', 'steep', 'thick', 'timber', 'cover', 'blowdown', 'deadfall',
+    'sidehill', 'drainage', 'escape', 'security', 'access', 'road', 'trail', 'mile',
+  ]
+  const textScore = securityTerms.reduce((score, term) => score + (text.includes(term) ? 2 : 0), 0)
+  return (typeScore[normalizedType] ?? 10) + slopeScore + textScore
+}
+
+function rankMaxPressurePois<T extends {
+  type?: string
+  slope?: number
+  description?: string
+  reasoningWhyHere?: string
+  reasoningWhyNotElsewhere?: string
+}>(pois: T[]): T[] {
+  return pois
+    .map((poi, index) => ({ poi, index, score: maxPressurePoiScore(poi) }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.poi)
 }
 
 /**
@@ -145,6 +206,22 @@ async function inspectPoiTerrainPrecisely(
     north: lat + halfExtent * latStep,
     west: lng - halfExtent * lngStep,
     east: lng + halfExtent * lngStep,
+  }
+  try {
+    const raster = await fetchElevationRaster(bounds, {
+      targetPixelSizeMeters: 10,
+      maxSidePixels: 768,
+      maxPixels: 500_000,
+    })
+    const grid = rasterToElevationGrid(raster, gridSize, 'bilinear')
+    const points = computeSlopeAspect(grid)
+    return inspectTerrainAt(points, grid, halfExtent, halfExtent)
+  } catch (err) {
+    const debug = process.env.DEBUG_POI_REJECTIONS === '1'
+    if (debug) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.log(`[precise] native raster inspection fallback at ${lat.toFixed(5)},${lng.toFixed(5)}: ${message}`)
+    }
   }
   try {
     const grid = await fetchElevationGrid(bounds, gridSize)
@@ -400,7 +477,22 @@ const pressureContext: Record<string, string> = {
 - During daylight, elk are in the nastiest terrain: 25-40° north-facing slopes with 80%+ canopy, blowdown, deadfall, drainage heads where ridges converge.
 - Travel corridors shift to drainage bottoms and timber-to-timber connections only — no exposed ridgelines.
 - POIs should be placed in terrain that is physically difficult for hunters to reach. If it's easy to get to, elk aren't there.`,
+
+  max: `HUNTING PRESSURE: MAX
+- Ignore time of day. Ignore feeding, water, wallow, travel, and normal bedding behavior layers. This mode is only about where elk retreat when hunting pressure is extreme.
+- Find the nastiest, least inviting terrain in the analysis area: steep sidehills, dark timber, drainage heads, brushy bowls, blowdown/deadfall, cliffy or sidehill approaches, and places where every route in is slow, noisy, and physically punishing.
+- Enforce a hard 1 mile minimum from roads, trails, buildings, and easy access points. Prefer terrain that is more than 1 mile from access when the data supports it.
+- Favor rugged security cover over convenience: 25-45° slopes, high local relief, headwater drainages, finger ridges dropping into timbered bowls, benches surrounded by steep ground, and terrain with poor glassing angles.
+- Reject attractive but easy terrain: open meadows, obvious saddles near roads, valley bottoms, gentle road-adjacent benches, visible parks, and clean timber that a hunter can quietly walk through.
+- Related behavior should be security only. These are pressure sanctuaries, not feeding or travel setups.`,
 }
+
+const maxPressureBehaviorRules = `MAX PRESSURE MODE — SECURITY SANCTUARIES ONLY
+- Time of day is intentionally disregarded. Do not balance dawn/midday/dusk behavior weights.
+- Behavior layers are intentionally disregarded except security. Do not generate feeding, water, wallow, or normal travel POIs.
+- Select terrain because it is hard to reach, hard to move through, hard to glass, and far from access.
+- Best candidates are remote drainage heads, steep timbered bowls, sidehill benches boxed in by steep terrain, finger ridges with nasty approaches, and dense cover above or below terrain breaks.
+- Every description should explain the access difficulty: distance from road/trail, steepness, timber/cover, noisy approach, escape routes, and why most hunters will avoid it.`
 
 /**
  * Build the GPT prompt for a specific season + time + pressure combo, reusing shared terrain context.
@@ -421,8 +513,22 @@ function buildPrompt(
   bufferMiles: number,
   bufferMeters: number,
 ): string {
-  const rules = seasonBehaviorRules[season] || seasonBehaviorRules['rut']
+  const isMaxPressure = pressure === 'max'
+  const rules = isMaxPressure ? maxPressureBehaviorRules : seasonBehaviorRules[season] || seasonBehaviorRules['rut']
   const pressureRules = pressureContext[pressure] || pressureContext['medium']
+  const timeLine = isMaxPressure ? 'Time of day: disregarded for MAX pressure' : `Time of day: ${timeOfDay}`
+  const focusRule = isMaxPressure
+    ? 'For MAX pressure specifically: ignore time-of-day behavior weights and generate only security sanctuaries that are hard to reach and hard to hunt.'
+    : `For "${timeOfDay}" specifically: focus POIs on the behaviors with the highest weights for this time window.`
+  const poiTypes = isMaxPressure
+    ? 'POI types: drainage, saddle, bench, ridge, finger-ridge'
+    : 'POI types: meadow, transition-zone, drainage, wallow, saddle, spring, bench, ridge, finger-ridge'
+  const behaviorTypes = isMaxPressure
+    ? 'Behaviors: security only'
+    : 'Behaviors: feeding, water, bedding, wallows, travel, security'
+  const poiQualityRule = isMaxPressure
+    ? `Generate at most ${MAX_PRESSURE_POI_LIMIT} points of interest. Return only the best security sanctuary options; in a small grid, one or two excellent options is better than three marginal ones.`
+    : 'Generate up to 10 high-quality points of interest.'
 
   return `You are an expert elk hunting guide placing points of interest using REAL terrain data. You have actual elevation measurements, computed slope/aspect, and verified land cover from OpenStreetMap. Every POI must be grounded in the data below.
 
@@ -430,7 +536,7 @@ MAP BOUNDS:
 - North: ${bounds.north.toFixed(5)}, South: ${bounds.south.toFixed(5)}
 - East: ${bounds.east.toFixed(5)}, West: ${bounds.west.toFixed(5)}
 - Center: ${centerLat.toFixed(5)}, ${centerLng.toFixed(5)}
-- Time of day: ${timeOfDay}
+- ${timeLine}
 
 REAL ELEVATION DATA:
 ${terrain.elevationProfile}
@@ -464,14 +570,14 @@ PLACEMENT RULES:
 3. Use REAL coordinates from detected terrain features and OSM data — do not invent locations.
 4. NEVER place near buildings or developed areas.
 5. Match POI type to real terrain: "meadow" ONLY on mapped meadows, "transition-zone" ONLY on detected 100-400m meadow/regrowth-to-timber staging bands, "drainage" ONLY at real drainage points, "saddle" ONLY at detected saddles, "spring" ONLY near confirmed water, "bench" ONLY for true sidehill shelves (gentle slope with terrain rising above AND dropping below — NOT drainage floors or finger-ridge spines), "finger-ridge" for sub-ridges spurring off a main ridgeline into a drainage, "ridge" for the spine of a main ridgeline.
-6. Descriptions MUST reference actual elevation, slope angle, aspect, and specific tactical advice for the current season + time of day.
-7. For "${timeOfDay}" specifically: focus POIs on the behaviors with the highest weights for this time window.
+6. Descriptions MUST reference actual elevation, slope angle, aspect, and specific tactical advice for the current analysis mode.
+7. ${focusRule}
 8. NEVER place POIs in a straight line, evenly-spaced row, or regular grid pattern. Real elk terrain is irregular — POIs should follow the natural shape of drainages, ridgelines, and meadow edges, never share the same latitude or longitude, and never be uniformly spaced. If two POIs would land within ~150m of each other, drop one. If you cannot find enough genuinely distinct terrain features, return FEWER POIs rather than fabricating positions to fill the area.
 
-Generate up to 10 high-quality points of interest. Only generate POIs where the terrain genuinely supports the behavior — if the area lacks suitable terrain for a behavior, generate fewer or zero POIs for it. Quality over quantity. Coordinates STRICTLY WITHIN bounds. Empty arrays are acceptable when terrain doesn't support a behavior — DO NOT pad with grid-pattern POIs.
+${poiQualityRule} Only generate POIs where the terrain genuinely supports the behavior — if the area lacks suitable terrain for a behavior, generate fewer or zero POIs for it. Quality over quantity. Coordinates STRICTLY WITHIN bounds. Empty arrays are acceptable when terrain doesn't support a behavior — DO NOT pad with grid-pattern POIs.
 
-POI types: meadow, transition-zone, drainage, wallow, saddle, spring, bench, ridge, finger-ridge
-Behaviors: feeding, water, bedding, wallows, travel, security
+${poiTypes}
+${behaviorTypes}
 
 Respond with ONLY valid JSON:
 {
@@ -497,7 +603,7 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
     return
   }
 
-  const { bounds, bufferMiles: rawBuffer } = req.body as GeneratePOIRequest
+  const { bounds, bufferMiles: rawBuffer, unitPolygon: rawUnitPolygon } = req.body as GeneratePOIRequest
 
   // Clamp buffer to 0.1–2.0 miles
   const bufferMiles = Math.max(0.1, Math.min(2.0, rawBuffer ?? DEFAULT_BUFFER_MILES))
@@ -510,6 +616,12 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
 
   if (bounds.north <= bounds.south || bounds.east <= bounds.west) {
     res.status(400).json({ error: 'Invalid bounds: north must be > south, east must be > west' })
+    return
+  }
+
+  const unitPolygon = rawUnitPolygon ? normalizeUnitPolygon(rawUnitPolygon) : null
+  if (rawUnitPolygon && !unitPolygon) {
+    res.status(400).json({ error: 'Invalid unitPolygon: expected GeoJSON Polygon or MultiPolygon' })
     return
   }
 
@@ -560,17 +672,31 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
   try {
     // ── Step 1: Fetch real data in parallel (shared across all 9 combos) ──
     console.log('Fetching OSM land data + elevation grid + MTBS fire history...')
-    const [landData, elevGrid, fireHistory] = await Promise.all([
+    const [rawLandData, terrainData, rawFireHistory] = await Promise.all([
       fetchLandData(bounds),
       // Adaptive grid: target ~175m cell spacing regardless of bbox size.
       // 200m was the resolution at which the dev inspector reliably caught
       // sharp peaks (confirmed against a real saddle at 46.53732,-111.38111).
       // 175m gives a small margin to dodge bilinear smoothing without
       // bloating the prompt with features from <100m noise.
-      // 2mi bbox → ~20×20, 3mi → ~28, 5mi → ~46, capped 20..60.
-      fetchElevationGrid(bounds, computeGridSize(bounds)),
+      // 2mi bbox -> ~20x20, 3mi -> ~28x28, 5mi -> ~46x46, capped 20..60.
+      unitPolygon
+        ? fetchHighResolutionTerrainMetrics(bounds)
+        : fetchElevationGrid(bounds, computeGridSize(bounds)),
       fetchFireHistory(bounds),
     ])
+
+    const highResMetrics = unitPolygon ? terrainData as HighResolutionTerrainMetrics : null
+    const elevGrid = highResMetrics ? highResMetrics.grid : terrainData as Awaited<ReturnType<typeof fetchElevationGrid>>
+
+    const { landData, fireHistory } = unitPolygon
+      ? (() => {
+          const clippedLand = clipLandDataToPolygon(rawLandData, unitPolygon)
+          const clippedFire = clipFireHistoryToPolygon(rawFireHistory, unitPolygon)
+          console.log(`Unit clipping applied: ${summarizeClipStats(clippedLand.stats, clippedFire.stats)}`)
+          return { landData: clippedLand.landData, fireHistory: clippedFire.fires }
+        })()
+      : { landData: rawLandData, fireHistory: rawFireHistory }
 
     const terrainSummary = summarizeLandData(landData)
     const fireHistorySummary = summarizeFireHistory(fireHistory)
@@ -596,7 +722,10 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
     console.log(`Elevation: ${elevGrid.minElevation.toFixed(0)}m – ${elevGrid.maxElevation.toFixed(0)}m (${elevGrid.points.length} points)`)
 
     // ── Step 2: Analyze terrain from real elevation data ──
-    const terrain = analyzeTerrainForPrompt(elevGrid, landData, fireHistory)
+    const terrain = appendHighResolutionTerrainNote(
+      analyzeTerrainForPrompt(elevGrid, landData, fireHistory),
+      highResMetrics,
+    )
     const featuresList = formatFeaturesForPrompt(terrain.detectedFeatures)
 
     {
@@ -630,7 +759,7 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
         }
       }
       roadAvoidanceSection = `
-ROADS AND TRAILS TO AVOID (maintain ${bufferMiles.toFixed(2)} mile / ${Math.round(bufferMeters)}m buffer from ALL of these):
+    ROADS AND TRAILS TO AVOID:
 ${roadSamples.join('\n')}
 `
     }
@@ -684,28 +813,50 @@ ${features.join('\n')}
     // ── Step 5: Compute terrain grid for verification (shared across all combos) ──
     const terrainPoints = computeSlopeAspect(elevGrid)
 
-    // ── Step 6: Build and run all 9 time×pressure GPT calls in parallel ──
+    // ── Step 6: Build and run all standard time×pressure GPT calls plus MAX ──
     const openai = getClient()
     const buildingPoints = landData.buildings.flatMap(b => b.geometry)
 
     type ComboKey = `${typeof TIMES[number]}_${typeof PRESSURES[number]}`
+    type Pressure = typeof PRESSURES[number]
     const comboResults: Record<string, unknown[]> = {}
     const openaiUsageEntries: OpenAITokenUsageEntry[] = []
 
     // Season is fixed from the request body
     const season = (req.body as GeneratePOIRequest).season || 'rut'
-    console.log(`Launching 9 parallel GPT calls (3 times × 3 pressures) for season: ${season}...`)
+    const comboPlans: Array<{
+      timeOfDay: typeof TIMES[number] | 'any'
+      pressure: Pressure
+      key: string
+      resultKeys: ComboKey[]
+    }> = [
+      ...TIMES.flatMap(timeOfDay =>
+        STANDARD_PRESSURES.map((pressure) => ({
+          timeOfDay,
+          pressure,
+          key: `${timeOfDay}_${pressure}`,
+          resultKeys: [`${timeOfDay}_${pressure}` as ComboKey],
+        })),
+      ),
+      {
+        timeOfDay: 'any',
+        pressure: 'max',
+        key: 'max',
+        resultKeys: TIMES.map(timeOfDay => `${timeOfDay}_max` as ComboKey),
+      },
+    ]
+    console.log(`Launching ${comboPlans.length} parallel GPT calls (9 standard + MAX pressure) for season: ${season}...`)
 
-    const comboPromises = TIMES.flatMap(timeOfDay =>
-      PRESSURES.map(async (pressure) => {
-        const key: ComboKey = `${timeOfDay}_${pressure}`
+    const comboPromises = comboPlans.map(async ({ timeOfDay, pressure, key, resultKeys }) => {
+        const comboBufferMiles = pressure === 'max' ? MAX_PRESSURE_BUFFER_MILES : bufferMiles
+        const comboBufferMeters = comboBufferMiles * METERS_PER_MILE
 
         try {
           const prompt = buildPrompt(
             season, timeOfDay, pressure, bounds, centerLat, centerLng,
             terrain, featuresList, terrainSummary, fireHistorySummary,
             roadAvoidanceSection, terrainFeaturesSection,
-            bufferMiles, bufferMeters,
+            comboBufferMiles, comboBufferMeters,
           )
 
           const completion = await openai.chat.completions.create({
@@ -783,7 +934,7 @@ ${features.join('\n')}
           // OSM coverage is incomplete (forest roads often missing), so we need
           // a safety margin even when the user picks a small value.
           const MIN_ROAD_BUFFER_METERS = 0.25 * METERS_PER_MILE // 400m
-          const effectiveRoadBuffer = Math.max(bufferMeters, MIN_ROAD_BUFFER_METERS)
+          const effectiveRoadBuffer = Math.max(comboBufferMeters, MIN_ROAD_BUFFER_METERS)
           const bufRejects = { outOfBounds: 0, nearRoad: 0, nearBuilding: 0, nearTown: 0 }
           type RejectDetail = { lat: number; lng: number; name?: string; type?: string; reason: string; note?: string }
           const debug = process.env.DEBUG_POI_REJECTIONS === '1'
@@ -809,7 +960,7 @@ ${features.join('\n')}
             }
             // Building buffer
             for (const bPt of buildingPoints) {
-              if (haversineMeters(poi.lat, poi.lng, bPt.lat, bPt.lng) < bufferMeters) {
+              if (haversineMeters(poi.lat, poi.lng, bPt.lat, bPt.lng) < comboBufferMeters) {
                 bufRejects.nearBuilding++
                 if (debug) bufRejectDetails.push({ lat: poi.lat, lng: poi.lng, name: poi.name, type: poi.type, reason: 'nearBuilding' })
                 return false
@@ -1049,6 +1200,7 @@ ${features.join('\n')}
             const { preciseFeatures: _preciseFeatures, ...publicPoi } = poi
             return {
               ...publicPoi,
+              relatedBehaviors: pressure === 'max' ? ['security'] : publicPoi.relatedBehaviors,
               description: correctDescriptionText(poi.description, {
                 elevationFt: poi.elevationFt,
                 slope: poi.slope,
@@ -1057,6 +1209,9 @@ ${features.join('\n')}
               reasoningWhyNotElsewhere: typeof poi.reasoningWhyNotElsewhere === 'string' ? poi.reasoningWhyNotElsewhere.trim() : '',
             }
           })
+          const finalPois = pressure === 'max'
+            ? rankMaxPressurePois(correctedPois).slice(0, MAX_PRESSURE_POI_LIMIT)
+            : correctedPois
 
           const rejGrid = terrainSanePois.length - nonGridPois.length
 
@@ -1070,10 +1225,11 @@ ${features.join('\n')}
             .join(',')
 
           console.log(
-            `  ${key}: ${rawPois.length} gen → ${filteredPois.length} buf → ${terrainSanePois.length} terr → ${nonGridPois.length} final` +
+            `  ${key}: ${rawPois.length} gen → ${filteredPois.length} buf → ${terrainSanePois.length} terr → ${finalPois.length} final` +
             (bufBreakdown ? `  [buf: ${bufBreakdown}]` : '') +
             (terrBreakdown ? `  [terr: ${terrBreakdown}]` : '') +
-            (rejGrid > 0 ? `  [grid: -${rejGrid}]` : '')
+            (rejGrid > 0 ? `  [grid: -${rejGrid}]` : '') +
+            (pressure === 'max' && nonGridPois.length > finalPois.length ? `  [max-cap: ${nonGridPois.length}→${finalPois.length}]` : '')
           )
 
           if (debug && (bufRejectDetails.length > 0 || terrRejectDetails.length > 0)) {
@@ -1085,23 +1241,24 @@ ${features.join('\n')}
             }
           }
 
-          return { key, pois: correctedPois }
+          return { key, resultKeys, pois: finalPois }
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err)
           console.error(`Combo ${key} failed: ${message}`)
-          return { key, pois: [] }
+          return { key, resultKeys, pois: [] }
         }
-      })
-    )
+    })
 
     const results = await Promise.all(comboPromises)
 
-    for (const { key, pois } of results) {
-      comboResults[key] = pois
+    for (const result of results) {
+      for (const resultKey of result.resultKeys ?? []) {
+        comboResults[resultKey] = result.pois
+      }
     }
 
     const totalPois = Object.values(comboResults).reduce((sum, arr) => sum + arr.length, 0)
-    console.log(`All 9 combos complete — ${totalPois} total POIs across all combinations`)
+    console.log(`All ${comboPlans.length} GPT calls complete — ${totalPois} total POIs across all displayed combinations`)
 
     if (openaiUsageEntries.length > 0) {
       const totals = openaiUsageEntries.reduce(

@@ -21,7 +21,7 @@ const mapStore = useMapStore()
 
 const selection = useSelectionBox(map)
 const measure = useMeasure(map)
-const { pois, hasResults, loading, error, errorCode, analyzedArea, fromCache, generatePOIs, clearPOIs, clearError } = useAIPois(map)
+const { pois, allCombos, hasResults, loading, error, errorCode, analyzedArea, fromCache, generatePOIs, clearPOIs, clearError } = useAIPois(map)
 
 const { terrainCells } = useHeatmap(map, analyzedArea)
 const { hoverScores, attach } = useHoverInfo(map, terrainCells)
@@ -121,7 +121,7 @@ const measureActive = computed(() => measure.active.value)
 
 defineExpose({
   map, hoverScores,
-  pois, hasResults, loading, error, errorCode, analyzedArea, fromCache,
+  pois, allCombos, hasResults, loading, error, errorCode, analyzedArea, fromCache,
   selection,
   measureActive,
   toggleMeasure: () => measure.toggle(),

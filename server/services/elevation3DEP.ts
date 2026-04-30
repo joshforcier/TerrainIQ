@@ -14,6 +14,7 @@
 
 import { fromArrayBuffer } from 'geotiff'
 import type { ElevationGrid, ElevationPoint } from './elevation.js'
+import { rasterToElevationGrid } from './terrainAnalysis.js'
 
 const EXPORT_URL =
   'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage'
@@ -25,6 +26,43 @@ const EXPORT_URL =
  * we also bump the analysis grid above 20×20.
  */
 const RASTER_SIZE = 1024
+const DEFAULT_TARGET_PIXEL_METERS = 10
+const MAX_RASTER_SIDE_PIXELS = 2048
+const MAX_RASTER_PIXELS = 4_000_000
+const TRANSIENT_EXPORT_STATUSES = new Set([502, 503, 504])
+
+type Bounds = { north: number; south: number; east: number; west: number }
+
+export interface RasterDataset {
+  data: Float32Array
+  nodataMask: Uint8Array
+  width: number
+  height: number
+  bounds: Bounds
+  noData: number
+  source: 'USGS_3DEP'
+  pixelSizeDegreesX: number
+  pixelSizeDegreesY: number
+  pixelSizeMetersX: number
+  pixelSizeMetersY: number
+  requestedPixelSizeMeters: number
+  actualPixelSizeMeters: number
+  nodataRatio: number
+}
+
+export interface RasterFetchOptions {
+  targetPixelSizeMeters?: number
+  maxSidePixels?: number
+  maxPixels?: number
+}
+
+export interface RasterExportSize {
+  width: number
+  height: number
+  requestedPixelSizeMeters: number
+  actualPixelSizeMeters: number
+  degraded: boolean
+}
 
 /**
  * Conservative US-coverage bbox tests. 3DEP technically also covers Hawaii
@@ -61,39 +99,149 @@ export function isInUSCoverage(bounds: {
  * source LiDAR was rejected for QC reasons. Plus very-large-negative floats
  * (the GDAL-style sentinel ~-3.4e38).
  */
-function isNodata(v: number): boolean {
+export function isElevationNodata(v: number): boolean {
   return Number.isNaN(v) || v < -1000 || !Number.isFinite(v)
 }
 
-export async function fetchElevationGrid3DEP(
-  bounds: { north: number; south: number; east: number; west: number },
-  gridSize = 20,
-): Promise<ElevationGrid> {
+export function compute3DEPExportSize(
+  bounds: Bounds,
+  targetPixelSizeMeters = DEFAULT_TARGET_PIXEL_METERS,
+  caps: { maxSidePixels?: number; maxPixels?: number } = {},
+): RasterExportSize {
+  const maxSidePixels = caps.maxSidePixels ?? MAX_RASTER_SIDE_PIXELS
+  const maxPixels = caps.maxPixels ?? MAX_RASTER_PIXELS
+  const centerLat = (bounds.north + bounds.south) / 2
+  const widthM = Math.max(1, (bounds.east - bounds.west) * 111_320 * Math.cos((centerLat * Math.PI) / 180))
+  const heightM = Math.max(1, (bounds.north - bounds.south) * 111_320)
+
+  let width = Math.max(2, Math.ceil(widthM / targetPixelSizeMeters))
+  let height = Math.max(2, Math.ceil(heightM / targetPixelSizeMeters))
+  let degraded = false
+
+  const sideScale = Math.max(width / maxSidePixels, height / maxSidePixels, 1)
+  if (sideScale > 1) {
+    width = Math.max(2, Math.floor(width / sideScale))
+    height = Math.max(2, Math.floor(height / sideScale))
+    degraded = true
+  }
+
+  const pixelScale = Math.sqrt((width * height) / maxPixels)
+  if (pixelScale > 1) {
+    width = Math.max(2, Math.floor(width / pixelScale))
+    height = Math.max(2, Math.floor(height / pixelScale))
+    degraded = true
+  }
+
+  const actualPixelSizeMeters = Math.max(widthM / width, heightM / height)
+  return {
+    width,
+    height,
+    requestedPixelSizeMeters: targetPixelSizeMeters,
+    actualPixelSizeMeters,
+    degraded,
+  }
+}
+
+export async function fetch3DEPRaster(
+  bounds: Bounds,
+  options: RasterFetchOptions = {},
+): Promise<RasterDataset> {
+  const exportSize = compute3DEPExportSize(bounds, options.targetPixelSizeMeters, {
+    maxSidePixels: options.maxSidePixels,
+    maxPixels: options.maxPixels,
+  })
   const url =
     `${EXPORT_URL}?` +
     new URLSearchParams({
       bbox: `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`,
       bboxSR: '4326',
       imageSR: '4326',
-      size: `${RASTER_SIZE},${RASTER_SIZE}`,
+      size: `${exportSize.width},${exportSize.height}`,
       format: 'tiff',
       pixelType: 'F32',
-      // Bilinear yields visibly smoother slopes than the default nearest-neighbor.
       interpolation: 'RSP_BilinearInterpolation',
       noData: '-9999',
       f: 'image',
     }).toString()
 
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'TerrainIQ/0.1 (+https://github.com/joshforcier/TerrainIQ)' },
-  })
+  const res = await fetch3DEPExport(url)
   if (!res.ok) {
     throw new Error(`USGS 3DEP exportImage returned ${res.status}`)
   }
 
   const buf = await res.arrayBuffer()
-  // The endpoint sometimes returns JSON error bodies with a 200 status when
-  // a parameter combo confuses it (e.g., absurd bboxes). Check the magic.
+  assertTiffResponse(buf)
+
+  const tiff = await fromArrayBuffer(buf)
+  const image = await tiff.getImage()
+  const width = image.getWidth()
+  const height = image.getHeight()
+  const rawRaster = await image.readRasters({ interleave: true })
+  const data = rawRaster instanceof Float32Array
+    ? rawRaster
+    : Float32Array.from(rawRaster as ArrayLike<number>)
+  const nodataMask = new Uint8Array(data.length)
+  let nodataCount = 0
+  for (let index = 0; index < data.length; index++) {
+    if (isElevationNodata(data[index])) {
+      nodataMask[index] = 1
+      nodataCount++
+    }
+  }
+
+  const centerLat = (bounds.north + bounds.south) / 2
+  const pixelSizeDegreesX = (bounds.east - bounds.west) / width
+  const pixelSizeDegreesY = (bounds.north - bounds.south) / height
+  const pixelSizeMetersX = Math.abs(pixelSizeDegreesX) * 111_320 * Math.cos((centerLat * Math.PI) / 180)
+  const pixelSizeMetersY = Math.abs(pixelSizeDegreesY) * 111_320
+  const nodataRatio = nodataCount / Math.max(data.length, 1)
+
+  if (nodataRatio > 0.1) {
+    throw new Error(
+      `USGS 3DEP returned ${nodataCount} nodata pixels out of ${data.length} (>10%) — coverage too thin`,
+    )
+  }
+
+  if (exportSize.degraded) {
+    console.log(
+      `USGS 3DEP raster request degraded: requested ${exportSize.requestedPixelSizeMeters}m, actual ~${exportSize.actualPixelSizeMeters.toFixed(1)}m (${width}x${height})`,
+    )
+  }
+
+  return {
+    data,
+    nodataMask,
+    width,
+    height,
+    bounds,
+    noData: -9999,
+    source: 'USGS_3DEP',
+    pixelSizeDegreesX,
+    pixelSizeDegreesY,
+    pixelSizeMetersX,
+    pixelSizeMetersY,
+    requestedPixelSizeMeters: exportSize.requestedPixelSizeMeters,
+    actualPixelSizeMeters: Math.max(pixelSizeMetersX, pixelSizeMetersY),
+    nodataRatio,
+  }
+}
+
+async function fetch3DEPExport(url: string): Promise<Response> {
+  let lastResponse: Response | null = null
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'TerrainIQ/0.1 (+https://github.com/joshforcier/TerrainIQ)' },
+    })
+    if (!TRANSIENT_EXPORT_STATUSES.has(response.status) || attempt === 2) {
+      return response
+    }
+    lastResponse = response
+    console.warn(`USGS 3DEP exportImage returned ${response.status}; retrying once`)
+  }
+  return lastResponse as Response
+}
+
+function assertTiffResponse(buf: ArrayBuffer): void {
   const sig = new Uint8Array(buf.slice(0, 4))
   const isLittleEndianTiff = sig[0] === 0x49 && sig[1] === 0x49 && sig[2] === 0x2a && sig[3] === 0x00
   const isBigEndianTiff = sig[0] === 0x4d && sig[1] === 0x4d && sig[2] === 0x00 && sig[3] === 0x2a
@@ -101,62 +249,12 @@ export async function fetchElevationGrid3DEP(
     const head = new TextDecoder().decode(buf.slice(0, 200))
     throw new Error(`USGS 3DEP returned non-TIFF response: ${head.slice(0, 120)}`)
   }
+}
 
-  const tiff = await fromArrayBuffer(buf)
-  const image = await tiff.getImage()
-  const width = image.getWidth()
-  const height = image.getHeight()
-  const raster = (await image.readRasters({ interleave: true })) as Float32Array
-
-  const points: ElevationPoint[] = []
-  const latStep = (bounds.north - bounds.south) / (gridSize - 1)
-  const lngStep = (bounds.east - bounds.west) / (gridSize - 1)
-
-  let nodataCount = 0
-  for (let row = 0; row < gridSize; row++) {
-    for (let col = 0; col < gridSize; col++) {
-      const lat = bounds.south + row * latStep
-      const lng = bounds.west + col * lngStep
-      // Image origin is top-left (north-west); pixel y increases southward.
-      const px = Math.min(
-        width - 1,
-        Math.max(0, Math.floor(((lng - bounds.west) / (bounds.east - bounds.west)) * (width - 1))),
-      )
-      const py = Math.min(
-        height - 1,
-        Math.max(0, Math.floor(((bounds.north - lat) / (bounds.north - bounds.south)) * (height - 1))),
-      )
-      let elev = raster[py * width + px]
-      if (isNodata(elev)) {
-        elev = 0
-        nodataCount++
-      }
-      points.push({ lat, lng, elevation: elev })
-    }
-  }
-
-  // If too many points came back as nodata, the caller should fall back to
-  // a different source rather than feed a swiss-cheese grid into terrain
-  // analysis. 10% threshold is empirical — light coastal/water content
-  // routinely produces a few % nodata, but a swiss-cheese >10% means coverage
-  // is genuinely thin and the result won't be trustworthy for slope/aspect.
-  if (nodataCount / points.length > 0.1) {
-    throw new Error(
-      `USGS 3DEP returned ${nodataCount} nodata points out of ${points.length} (>10%) — coverage too thin`,
-    )
-  }
-
-  const valid = points.map((p) => p.elevation).filter((e) => e > -500 && e < 9000)
-  const minElevation = valid.length ? Math.min(...valid) : 0
-  const maxElevation = valid.length ? Math.max(...valid) : 0
-  const avgElevation = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : 0
-
-  return {
-    points,
-    rows: gridSize,
-    cols: gridSize,
-    minElevation,
-    maxElevation,
-    avgElevation,
-  }
+export async function fetchElevationGrid3DEP(
+  bounds: { north: number; south: number; east: number; west: number },
+  gridSize = 20,
+): Promise<ElevationGrid> {
+  const raster = await fetch3DEPRaster(bounds, { targetPixelSizeMeters: DEFAULT_TARGET_PIXEL_METERS })
+  return rasterToElevationGrid(raster, gridSize, 'bilinear')
 }

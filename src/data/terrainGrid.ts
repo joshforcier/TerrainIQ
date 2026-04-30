@@ -64,6 +64,7 @@ export function generateTerrainGrid(
       const bedding = terrainNoise(lat, lng, 4.0, 600) * (0.65 + rand() * 0.35)
       const wallows = terrainNoise(lat, lng, 6.5, 1500) * (0.5 + rand() * 0.5)
       const travel = terrainNoise(lat, lng, 8.0, 900) * (0.6 + rand() * 0.4)
+      const security = terrainNoise(lat, lng, 10.5, 700) * (0.7 + rand() * 0.3)
 
       cells.push({
         lat,
@@ -74,6 +75,7 @@ export function generateTerrainGrid(
           bedding: Math.max(0, Math.min(1, bedding)),
           wallows: Math.max(0, Math.min(1, wallows)),
           travel: Math.max(0, Math.min(1, travel)),
+          security: Math.max(0, Math.min(1, security)),
         },
       })
     }

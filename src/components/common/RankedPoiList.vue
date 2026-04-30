@@ -12,14 +12,19 @@ import {
 
 const mapStore = useMapStore()
 
-const enabledLayers = computed<EnabledLayers>(() => ({
-  feeding: mapStore.activeBehaviors.includes('feeding'),
-  water: mapStore.activeBehaviors.includes('water'),
-  bedding: mapStore.activeBehaviors.includes('bedding'),
-  wallows: mapStore.activeBehaviors.includes('wallows'),
-  travel: mapStore.activeBehaviors.includes('travel'),
-  security: mapStore.activeBehaviors.includes('security'),
-}))
+const enabledLayers = computed<EnabledLayers>(() => {
+  if (mapStore.huntingPressure === 'max') {
+    return { feeding: true, water: true, bedding: true, wallows: true, travel: true, security: true }
+  }
+  return {
+    feeding: mapStore.activeBehaviors.includes('feeding'),
+    water: mapStore.activeBehaviors.includes('water'),
+    bedding: mapStore.activeBehaviors.includes('bedding'),
+    wallows: mapStore.activeBehaviors.includes('wallows'),
+    travel: mapStore.activeBehaviors.includes('travel'),
+    security: mapStore.activeBehaviors.includes('security'),
+  }
+})
 
 interface RankedRow {
   id: string

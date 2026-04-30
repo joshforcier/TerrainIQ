@@ -37,6 +37,7 @@ const pressureOptions: { label: string; value: HuntingPressure }[] = [
   { label: 'Low', value: 'low' },
   { label: 'Med', value: 'medium' },
   { label: 'High', value: 'high' },
+  { label: 'Max', value: 'max' },
 ]
 
 const tabs: { label: string; value: SidebarTab }[] = [
@@ -44,14 +45,19 @@ const tabs: { label: string; value: SidebarTab }[] = [
   { label: 'Ranked POIs', value: 'pois' },
 ]
 
-const enabledLayers = computed<EnabledLayers>(() => ({
-  feeding: mapStore.activeBehaviors.includes('feeding'),
-  water: mapStore.activeBehaviors.includes('water'),
-  bedding: mapStore.activeBehaviors.includes('bedding'),
-  wallows: mapStore.activeBehaviors.includes('wallows'),
-  travel: mapStore.activeBehaviors.includes('travel'),
-  security: mapStore.activeBehaviors.includes('security'),
-}))
+const enabledLayers = computed<EnabledLayers>(() => {
+  if (mapStore.huntingPressure === 'max') {
+    return { feeding: true, water: true, bedding: true, wallows: true, travel: true, security: true }
+  }
+  return {
+    feeding: mapStore.activeBehaviors.includes('feeding'),
+    water: mapStore.activeBehaviors.includes('water'),
+    bedding: mapStore.activeBehaviors.includes('bedding'),
+    wallows: mapStore.activeBehaviors.includes('wallows'),
+    travel: mapStore.activeBehaviors.includes('travel'),
+    security: mapStore.activeBehaviors.includes('security'),
+  }
+})
 
 const visiblePoiCount = computed(() => {
   let n = 0
@@ -61,6 +67,10 @@ const visiblePoiCount = computed(() => {
   }
   return n
 })
+
+function setBufferMiles(value: number | null) {
+  if (typeof value === 'number') mapStore.bufferMiles = value
+}
 </script>
 
 <template>
@@ -145,12 +155,17 @@ const visiblePoiCount = computed(() => {
                 :class="{
                   'toggle-btn--active': mapStore.huntingPressure === opt.value,
                   'toggle-btn--pressure-high': mapStore.huntingPressure === 'high' && opt.value === 'high',
+                  'toggle-btn--pressure-max': mapStore.huntingPressure === 'max' && opt.value === 'max',
                 }"
                 @click="mapStore.setHuntingPressure(opt.value)"
               >
                 {{ opt.label }}
               </button>
             </div>
+            <p v-if="mapStore.huntingPressure === 'max'" class="max-pressure-hint">
+              <q-icon name="shield" size="12px" />
+              Security-only mode. Time of day and behavior layers are ignored.
+            </p>
           </div>
 
           <!-- Behavior Layers + Weights -->
@@ -164,7 +179,7 @@ const visiblePoiCount = computed(() => {
                 v-for="b in behaviors"
                 :key="b"
                 class="behavior-row"
-                :class="{ 'behavior-row--inactive': !mapStore.activeBehaviors.includes(b) }"
+                :class="{ 'behavior-row--inactive': mapStore.huntingPressure !== 'max' && !mapStore.activeBehaviors.includes(b) }"
               >
                 <q-checkbox
                   :model-value="mapStore.activeBehaviors.includes(b)"
@@ -172,6 +187,7 @@ const visiblePoiCount = computed(() => {
                   color="amber"
                   dense
                   class="behavior-check"
+                  :disable="mapStore.huntingPressure === 'max'"
                 />
                 <span class="behavior-dot" :style="{ background: behaviorColors[b] }" />
                 <span class="behavior-name">{{ behaviorLabels[b] }}</span>
@@ -181,8 +197,8 @@ const visiblePoiCount = computed(() => {
                       class="behavior-bar-fill"
                       :style="{
                         width: `${mapStore.currentWeights[b] * 100}%`,
-                        background: mapStore.activeBehaviors.includes(b) ? behaviorColors[b] : '#2a3545',
-                        opacity: mapStore.activeBehaviors.includes(b) ? 1 : 0.3,
+                        background: enabledLayers[b] ? behaviorColors[b] : '#2a3545',
+                        opacity: enabledLayers[b] ? 1 : 0.3,
                       }"
                     />
                   </div>
@@ -206,7 +222,7 @@ const visiblePoiCount = computed(() => {
               </div>
               <q-slider
                 :model-value="mapStore.bufferMiles"
-                @update:model-value="mapStore.bufferMiles = $event"
+                @update:model-value="setBufferMiles"
                 :min="0.1"
                 :max="2"
                 :step="0.05"
@@ -386,6 +402,12 @@ const visiblePoiCount = computed(() => {
   border: 1px solid rgba(239, 68, 68, 0.25);
 }
 
+.toggle-btn--pressure-max {
+  background: rgba(248, 113, 113, 0.18);
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.38);
+}
+
 .toggle-group--locked {
   opacity: 0.5;
   pointer-events: none;
@@ -398,6 +420,29 @@ const visiblePoiCount = computed(() => {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.max-pressure-hint,
+.behavior-locked-hint {
+  margin: 8px 0 0;
+  color: #c77f80;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.max-pressure-hint {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 1px solid rgba(248, 113, 113, 0.22);
+  border-radius: 7px;
+  background: rgba(248, 113, 113, 0.06);
+}
+
+.behavior-locked-hint {
+  margin: -2px 0 9px;
 }
 
 /* ─── Behavior Layers ─── */

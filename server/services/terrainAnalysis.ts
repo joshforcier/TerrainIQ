@@ -14,6 +14,7 @@
  */
 
 import type { ElevationGrid, ElevationPoint } from './elevation'
+import type { RasterDataset } from './elevation3DEP.js'
 import type { OSMLandData } from '../routes/overpass'
 import type { FireHistoryFeature } from './fireHistory'
 
@@ -23,6 +24,178 @@ export interface TerrainPoint extends ElevationPoint {
   slope: number        // degrees 0-90
   aspect: number       // degrees 0-360 (0=N, 90=E, 180=S, 270=W)
   aspectLabel: string  // 'N', 'NE', 'E', etc.
+}
+
+export interface RasterMetrics {
+  slope: Float32Array
+  aspect: Float32Array
+  localRelief: Float32Array
+  elevationBands: Uint8Array
+  nodataMask: Uint8Array
+  minElevation: number
+  maxElevation: number
+}
+
+export function computeRasterMetrics(
+  raster: RasterDataset,
+  options: { reliefRadiusMeters?: number } = {},
+): RasterMetrics {
+  const reliefRadiusMeters = options.reliefRadiusMeters ?? 120
+  const { slope, aspect, nodataMask } = computeRasterSlopeAspect(raster)
+  const localRelief = computeRasterLocalRelief(raster, reliefRadiusMeters)
+  const { bands: elevationBands, minElevation, maxElevation } = computeElevationBandsFromRaster(raster)
+  return { slope, aspect, localRelief, elevationBands, nodataMask, minElevation, maxElevation }
+}
+
+export function computeRasterSlopeAspect(raster: RasterDataset): Pick<RasterMetrics, 'slope' | 'aspect' | 'nodataMask'> {
+  const { width, height, data } = raster
+  const slope = new Float32Array(data.length)
+  const aspect = new Float32Array(data.length)
+  const nodataMask = new Uint8Array(raster.nodataMask)
+
+  for (let row = 0; row < height; row++) {
+    const lat = raster.bounds.north - (row + 0.5) * raster.pixelSizeDegreesY
+    const cellSizeX = Math.max(1, Math.abs(raster.pixelSizeDegreesX) * 111_320 * Math.cos((lat * Math.PI) / 180))
+    const cellSizeY = Math.max(1, raster.pixelSizeMetersY)
+
+    for (let col = 0; col < width; col++) {
+      const index = row * width + col
+      const leftIndex = row * width + Math.max(0, col - 1)
+      const rightIndex = row * width + Math.min(width - 1, col + 1)
+      const upIndex = Math.max(0, row - 1) * width + col
+      const downIndex = Math.min(height - 1, row + 1) * width + col
+
+      if (nodataMask[index] || nodataMask[leftIndex] || nodataMask[rightIndex] || nodataMask[upIndex] || nodataMask[downIndex]) {
+        nodataMask[index] = 1
+        slope[index] = 0
+        aspect[index] = 0
+        continue
+      }
+
+      const dzdx = (data[rightIndex] - data[leftIndex]) / (2 * cellSizeX)
+      const dzdy = (data[upIndex] - data[downIndex]) / (2 * cellSizeY)
+      const slopeDeg = Math.atan(Math.sqrt(dzdx * dzdx + dzdy * dzdy)) * (180 / Math.PI)
+      let aspectDeg = Math.atan2(-dzdx, -dzdy) * (180 / Math.PI)
+      if (aspectDeg < 0) aspectDeg += 360
+      slope[index] = slopeDeg
+      aspect[index] = aspectDeg
+    }
+  }
+
+  return { slope, aspect, nodataMask }
+}
+
+export function computeRasterLocalRelief(raster: RasterDataset, radiusMeters: number): Float32Array {
+  const { width, height, data, nodataMask } = raster
+  const relief = new Float32Array(data.length)
+  const radiusX = Math.max(1, Math.round(radiusMeters / Math.max(1, raster.pixelSizeMetersX)))
+  const radiusY = Math.max(1, Math.round(radiusMeters / Math.max(1, raster.pixelSizeMetersY)))
+
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const index = row * width + col
+      if (nodataMask[index]) continue
+      let min = Infinity
+      let max = -Infinity
+      for (let sampleRow = Math.max(0, row - radiusY); sampleRow <= Math.min(height - 1, row + radiusY); sampleRow++) {
+        for (let sampleCol = Math.max(0, col - radiusX); sampleCol <= Math.min(width - 1, col + radiusX); sampleCol++) {
+          const sampleIndex = sampleRow * width + sampleCol
+          if (nodataMask[sampleIndex]) continue
+          const elevation = data[sampleIndex]
+          min = Math.min(min, elevation)
+          max = Math.max(max, elevation)
+        }
+      }
+      relief[index] = Number.isFinite(min) && Number.isFinite(max) ? Math.max(0, max - min) : 0
+    }
+  }
+
+  return relief
+}
+
+export function computeElevationBandsFromRaster(raster: RasterDataset): { bands: Uint8Array; minElevation: number; maxElevation: number } {
+  const bands = new Uint8Array(raster.data.length)
+  let minElevation = Infinity
+  let maxElevation = -Infinity
+  for (let index = 0; index < raster.data.length; index++) {
+    if (raster.nodataMask[index]) continue
+    minElevation = Math.min(minElevation, raster.data[index])
+    maxElevation = Math.max(maxElevation, raster.data[index])
+  }
+  if (!Number.isFinite(minElevation) || !Number.isFinite(maxElevation)) {
+    return { bands, minElevation: 0, maxElevation: 0 }
+  }
+
+  const range = Math.max(1, maxElevation - minElevation)
+  for (let index = 0; index < raster.data.length; index++) {
+    if (raster.nodataMask[index]) continue
+    const normalized = (raster.data[index] - minElevation) / range
+    bands[index] = normalized < 0.33 ? 0 : normalized < 0.66 ? 1 : 2
+  }
+  return { bands, minElevation, maxElevation }
+}
+
+export function rasterToElevationGrid(
+  raster: RasterDataset,
+  gridSize: number,
+  method: 'nearest' | 'bilinear' = 'bilinear',
+): ElevationGrid {
+  const points: ElevationPoint[] = []
+  const rows = gridSize
+  const cols = gridSize
+  const latStep = (raster.bounds.north - raster.bounds.south) / (rows - 1)
+  const lngStep = (raster.bounds.east - raster.bounds.west) / (cols - 1)
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const lat = raster.bounds.south + row * latStep
+      const lng = raster.bounds.west + col * lngStep
+      points.push({ lat, lng, elevation: sampleRaster(raster, lat, lng, method) })
+    }
+  }
+
+  const valid = points.map((point) => point.elevation).filter((elevation) => elevation > -500 && elevation < 9000)
+  const minElevation = valid.length ? Math.min(...valid) : 0
+  const maxElevation = valid.length ? Math.max(...valid) : 0
+  const avgElevation = valid.length ? valid.reduce((sum, elevation) => sum + elevation, 0) / valid.length : 0
+
+  return { points, rows, cols, minElevation, maxElevation, avgElevation }
+}
+
+function sampleRaster(raster: RasterDataset, lat: number, lng: number, method: 'nearest' | 'bilinear'): number {
+  const x = ((lng - raster.bounds.west) / (raster.bounds.east - raster.bounds.west)) * (raster.width - 1)
+  const y = ((raster.bounds.north - lat) / (raster.bounds.north - raster.bounds.south)) * (raster.height - 1)
+  if (method === 'nearest') {
+    return sampleRasterNearest(raster, x, y)
+  }
+
+  const x0 = Math.max(0, Math.min(raster.width - 1, Math.floor(x)))
+  const x1 = Math.max(0, Math.min(raster.width - 1, x0 + 1))
+  const y0 = Math.max(0, Math.min(raster.height - 1, Math.floor(y)))
+  const y1 = Math.max(0, Math.min(raster.height - 1, y0 + 1))
+  const wx = x - x0
+  const wy = y - y0
+  const samples = [
+    { index: y0 * raster.width + x0, weight: (1 - wx) * (1 - wy) },
+    { index: y0 * raster.width + x1, weight: wx * (1 - wy) },
+    { index: y1 * raster.width + x0, weight: (1 - wx) * wy },
+    { index: y1 * raster.width + x1, weight: wx * wy },
+  ]
+  let weighted = 0
+  let totalWeight = 0
+  for (const sample of samples) {
+    if (raster.nodataMask[sample.index]) continue
+    weighted += raster.data[sample.index] * sample.weight
+    totalWeight += sample.weight
+  }
+  return totalWeight > 0 ? weighted / totalWeight : sampleRasterNearest(raster, x, y)
+}
+
+function sampleRasterNearest(raster: RasterDataset, x: number, y: number): number {
+  const col = Math.max(0, Math.min(raster.width - 1, Math.round(x)))
+  const row = Math.max(0, Math.min(raster.height - 1, Math.round(y)))
+  const index = row * raster.width + col
+  return raster.nodataMask[index] ? 0 : raster.data[index]
 }
 
 export function computeSlopeAspect(
@@ -164,6 +337,72 @@ interface TerrainFeature {
   description: string
 }
 
+type SaddleWedgeTrend = 'up' | 'down' | 'mixed' | 'flat'
+
+interface SaddleWedgeProfile {
+  hi: number
+  lo: number
+  upRelief: number
+  downRelief: number
+  nearestUpDistSq: number
+  nearestDownDistSq: number
+  trend: SaddleWedgeTrend
+}
+
+function buildSaddleWedgeProfiles(
+  wedgeHi: number[],
+  wedgeLo: number[],
+  wedgeNearestUpDistSq: number[],
+  wedgeNearestDownDistSq: number[],
+  centerElevation: number,
+): SaddleWedgeProfile[] {
+  return wedgeHi.map((hi, index) => {
+    const lo = wedgeLo[index]
+    const upRelief = Number.isFinite(hi) ? hi - centerElevation : -Infinity
+    const downRelief = Number.isFinite(lo) ? centerElevation - lo : -Infinity
+    const nearestUpDistSq = wedgeNearestUpDistSq[index]
+    const nearestDownDistSq = wedgeNearestDownDistSq[index]
+    const hasUp = Number.isFinite(nearestUpDistSq)
+    const hasDown = Number.isFinite(nearestDownDistSq)
+    const trend: SaddleWedgeTrend = hasUp && hasDown
+      ? nearestUpDistSq < nearestDownDistSq
+        ? 'up'
+        : nearestDownDistSq < nearestUpDistSq
+          ? 'down'
+          : 'mixed'
+      : hasUp
+        ? 'up'
+        : hasDown
+          ? 'down'
+          : 'flat'
+    return { hi, lo, upRelief, downRelief, nearestUpDistSq, nearestDownDistSq, trend }
+  })
+}
+
+function checkCoherentSaddleAxis(
+  profiles: SaddleWedgeProfile[],
+  highIdxA: number,
+  highIdxB: number,
+  lowIdxA: number,
+  lowIdxB: number,
+): { detected: boolean; aboveRelief: number; belowRelief: number } {
+  const highA = profiles[highIdxA]
+  const highB = profiles[highIdxB]
+  const lowA = profiles[lowIdxA]
+  const lowB = profiles[lowIdxB]
+  const aboveRelief = Math.min(highA.upRelief, highB.upRelief)
+  const belowRelief = Math.min(lowA.downRelief, lowB.downRelief)
+  return {
+    detected:
+      highA.trend === 'up' &&
+      highB.trend === 'up' &&
+      lowA.trend === 'down' &&
+      lowB.trend === 'down',
+    aboveRelief,
+    belowRelief,
+  }
+}
+
 function detectFeatures(
   terrainPoints: TerrainPoint[],
   grid: ElevationGrid
@@ -197,6 +436,7 @@ function detectFeatures(
       // wedges (N, NE, E, SE, S, SW, W, NW). Track max + min elevation per
       // wedge. This catches peaks at any azimuth — a single-ray search would
       // miss a peak just a few degrees off the ray.
+      const SADDLE_RELIEF_M = 8
       const SADDLE_SEARCH_RADIUS = 15 // cells; ~2.6 km at 175m production spacing
       // Tactical elk saddles bracket peaks 1-3 km apart. Beyond ~3 km the
       // wedge pattern starts catching regional topology (cross-valley
@@ -204,6 +444,8 @@ function detectFeatures(
       // isn't the kind of crossing elk actually use.
       const wedgeHi = new Array(8).fill(-Infinity)
       const wedgeLo = new Array(8).fill(Infinity)
+      const wedgeNearestUpDistSq = new Array(8).fill(Infinity)
+      const wedgeNearestDownDistSq = new Array(8).fill(Infinity)
       for (let ddr = -SADDLE_SEARCH_RADIUS; ddr <= SADDLE_SEARCH_RADIUS; ddr++) {
         for (let ddc = -SADDLE_SEARCH_RADIUS; ddc <= SADDLE_SEARCH_RADIUS; ddc++) {
           if (ddr === 0 && ddc === 0) continue
@@ -220,6 +462,12 @@ function detectFeatures(
           const elev = terrainPoints[nr * cols + nc].elevation
           if (elev > wedgeHi[w]) wedgeHi[w] = elev
           if (elev < wedgeLo[w]) wedgeLo[w] = elev
+          if (elev - pt.elevation >= SADDLE_RELIEF_M && distSq < wedgeNearestUpDistSq[w]) {
+            wedgeNearestUpDistSq[w] = distSq
+          }
+          if (pt.elevation - elev >= SADDLE_RELIEF_M && distSq < wedgeNearestDownDistSq[w]) {
+            wedgeNearestDownDistSq[w] = distSq
+          }
         }
       }
 
@@ -234,20 +482,17 @@ function detectFeatures(
       // 8m is calibrated for USGS 3DEP (sub-meter vertical accuracy).
       // "Low points on ridgelines where elk cross between drainages.
       //  Bulls frequently bugle from saddles because sound carries both directions."
-      const SADDLE_RELIEF_M = 8
-      // checkSaddleAxis: do both wedges A,B contain terrain ≥pt+8m AND both
-      // wedges C,D contain terrain ≤pt-8m? Wedge indices: 0=N, 1=NE, 2=E, ...
-      const checkSaddleAxis = (
-        highIdxA: number, highIdxB: number,
-        lowIdxA: number, lowIdxB: number,
-      ): boolean => {
-        const minHigh = Math.min(wedgeHi[highIdxA], wedgeHi[highIdxB])
-        const maxLow = Math.max(wedgeLo[lowIdxA], wedgeLo[lowIdxB])
-        return (
-          minHigh - pt.elevation >= SADDLE_RELIEF_M &&
-          pt.elevation - maxLow >= SADDLE_RELIEF_M
-        )
-      }
+      // Wedge indices: 0=N, 1=NE, 2=E, ... A wedge must be directionally
+      // coherent by first meaningful terrain break from the point. A ridge
+      // wedge can drop beyond the ridge, and a drainage wedge can climb beyond
+      // the draw, but the first material break must match the expected trend.
+      const saddleProfiles = buildSaddleWedgeProfiles(
+        wedgeHi,
+        wedgeLo,
+        wedgeNearestUpDistSq,
+        wedgeNearestDownDistSq,
+        pt.elevation,
+      )
 
       // Slope cap: real elk-tactical saddles are gentle at the col point.
       // Broad sidehills can satisfy the far-field wedge topology (higher
@@ -255,10 +500,10 @@ function detectFeatures(
       // saddles to actual low-gradient cols instead of ordinary slope cells.
       const isSaddle =
         pt.slope <= 12 &&
-        (checkSaddleAxis(0, 4, 2, 6) ||  // N-S ridge / E-W drainage
-         checkSaddleAxis(2, 6, 0, 4) ||  // E-W ridge / N-S drainage
-         checkSaddleAxis(1, 5, 3, 7) ||  // NE-SW ridge / NW-SE drainage
-         checkSaddleAxis(3, 7, 1, 5))    // NW-SE ridge / NE-SW drainage
+        (checkCoherentSaddleAxis(saddleProfiles, 0, 4, 2, 6).detected ||  // N-S ridge / E-W drainage
+         checkCoherentSaddleAxis(saddleProfiles, 2, 6, 0, 4).detected ||  // E-W ridge / N-S drainage
+         checkCoherentSaddleAxis(saddleProfiles, 1, 5, 3, 7).detected ||  // NE-SW ridge / NW-SE drainage
+         checkCoherentSaddleAxis(saddleProfiles, 3, 7, 1, 5).detected)    // NW-SE ridge / NE-SW drainage
 
       if (isSaddle) {
         saddleCandidates.push({ r, c, pt })
@@ -314,7 +559,7 @@ function detectFeatures(
       const aboveRelief = maxN - pt.elevation // m of terrain rising above
       const belowRelief = pt.elevation - minN // m of terrain dropping below
       const isMidSlope = aboveRelief >= 8 && belowRelief >= 8
-      if (pt.slope < 10 && avgNeighborSlope > 15 && isMidSlope) {
+      if (pt.slope < 20 && avgNeighborSlope > 15 && isMidSlope) {
         // Classify the bench by aspect for seasonal relevance
         const isNorthFacing = ['N', 'NE', 'NW'].includes(pt.aspectLabel)
         const isSouthFacing = ['S', 'SE', 'SW'].includes(pt.aspectLabel)
@@ -584,10 +829,13 @@ export function inspectTerrainAt(
   // single-ray search has when peaks aren't perfectly axis-aligned.
   const wedgeHi = new Array(8).fill(-Infinity)
   const wedgeLo = new Array(8).fill(Infinity)
+  const wedgeNearestUpDistSq = new Array(8).fill(Infinity)
+  const wedgeNearestDownDistSq = new Array(8).fill(Infinity)
   for (let ddr = -SADDLE_SEARCH_RADIUS; ddr <= SADDLE_SEARCH_RADIUS; ddr++) {
     for (let ddc = -SADDLE_SEARCH_RADIUS; ddc <= SADDLE_SEARCH_RADIUS; ddc++) {
       if (ddr === 0 && ddc === 0) continue
-      if (ddr * ddr + ddc * ddc > SADDLE_SEARCH_RADIUS * SADDLE_SEARCH_RADIUS) continue
+      const distSq = ddr * ddr + ddc * ddc
+      if (distSq > SADDLE_SEARCH_RADIUS * SADDLE_SEARCH_RADIUS) continue
       const nr = centerR + ddr
       const nc = centerC + ddc
       if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue
@@ -597,6 +845,12 @@ export function inspectTerrainAt(
       const elev = terrainPoints[nr * cols + nc].elevation
       if (elev > wedgeHi[w]) wedgeHi[w] = elev
       if (elev < wedgeLo[w]) wedgeLo[w] = elev
+      if (elev - pt.elevation >= SADDLE_RELIEF_M && distSq < wedgeNearestUpDistSq[w]) {
+        wedgeNearestUpDistSq[w] = distSq
+      }
+      if (pt.elevation - elev >= SADDLE_RELIEF_M && distSq < wedgeNearestDownDistSq[w]) {
+        wedgeNearestDownDistSq[w] = distSq
+      }
     }
   }
 
@@ -609,7 +863,14 @@ export function inspectTerrainAt(
   ]
 
   let saddleResult = { detected: false, reason: '' }
-  let bestSaddleAxis: { name: string; aboveRelief: number; belowRelief: number } | null = null
+  let bestSaddleAxis: { name: string; aboveRelief: number; belowRelief: number; coherence: string } | null = null
+  const saddleProfiles = buildSaddleWedgeProfiles(
+    wedgeHi,
+    wedgeLo,
+    wedgeNearestUpDistSq,
+    wedgeNearestDownDistSq,
+    pt.elevation,
+  )
   // Slope cap: a real elk-tactical saddle is gentle at the col point.
   // 12° filters ordinary sidehills whose far-field relief happens to look
   // like a saddle axis across several kilometers.
@@ -618,20 +879,22 @@ export function inspectTerrainAt(
     saddleResult.reason = `slope ${pt.slope.toFixed(1)}° (need ≤${SADDLE_MAX_SLOPE}° for a crossable col)`
   } else {
     for (const axis of axes) {
-      const aboveRelief = Math.min(wedgeHi[axis.hA], wedgeHi[axis.hB]) - pt.elevation
-      const belowRelief = pt.elevation - Math.max(wedgeLo[axis.lA], wedgeLo[axis.lB])
-      if (aboveRelief >= SADDLE_RELIEF_M && belowRelief >= SADDLE_RELIEF_M) {
+      const axisCheck = checkCoherentSaddleAxis(saddleProfiles, axis.hA, axis.hB, axis.lA, axis.lB)
+      const coherence = [axis.hA, axis.hB, axis.lA, axis.lB]
+        .map((index) => `${wedgeNames[index]}:${saddleProfiles[index].trend}`)
+        .join(' ')
+      if (axisCheck.detected) {
         saddleResult = {
           detected: true,
-          reason: `${axis.name}: ${aboveRelief.toFixed(1)}m above, ${belowRelief.toFixed(1)}m below`,
+          reason: `${axis.name}: ${axisCheck.aboveRelief.toFixed(1)}m above, ${axisCheck.belowRelief.toFixed(1)}m below; coherent ${coherence}`,
         }
         break
       }
       if (
         !bestSaddleAxis ||
-        aboveRelief + belowRelief > bestSaddleAxis.aboveRelief + bestSaddleAxis.belowRelief
+        axisCheck.aboveRelief + axisCheck.belowRelief > bestSaddleAxis.aboveRelief + bestSaddleAxis.belowRelief
       ) {
-        bestSaddleAxis = { name: axis.name, aboveRelief, belowRelief }
+        bestSaddleAxis = { name: axis.name, aboveRelief: axisCheck.aboveRelief, belowRelief: axisCheck.belowRelief, coherence }
       }
     }
   }
@@ -642,14 +905,20 @@ export function inspectTerrainAt(
       const d = n - pt.elevation
       return (d > 0 ? '+' : '') + d.toFixed(0)
     }
+    const fmtCells = (n: number) => Number.isFinite(n) ? Math.sqrt(n).toFixed(1) : '·'
     const directional = wedgeNames
-      .map((name, i) => `${name}=${fmt(wedgeHi[i])}/${fmt(wedgeLo[i])}`)
+      .map((name, i) => {
+        const profile = saddleProfiles[i]
+        return `${name}=${profile.trend} hi/lo ${fmt(profile.hi)}/${fmt(profile.lo)} first +${fmtCells(profile.nearestUpDistSq)}c -${fmtCells(profile.nearestDownDistSq)}c`
+      })
       .join(', ')
     saddleResult.reason =
       `closest axis "${bestSaddleAxis.name}": only ` +
       `${bestSaddleAxis.aboveRelief.toFixed(1)}m above / ` +
-      `${bestSaddleAxis.belowRelief.toFixed(1)}m below (need ≥${SADDLE_RELIEF_M}m each). ` +
-      `wedge hi/lo: ${directional}`
+      `${bestSaddleAxis.belowRelief.toFixed(1)}m below with first-break opposite directions ` +
+      `(need ≥${SADDLE_RELIEF_M}m each and high wedges first-up / low wedges first-down). ` +
+      `trends: ${bestSaddleAxis.coherence}. ` +
+      `wedges: ${directional}`
   }
 
   const neighbors = [above, below, left, right]
@@ -684,7 +953,7 @@ export function inspectTerrainAt(
   const aboveRelief = maxN - pt.elevation
   const belowRelief = pt.elevation - minN
   const benchPasses =
-    pt.slope < 10 &&
+    pt.slope < 20 &&
     avgNeighborSlope > 15 &&
     aboveRelief >= BENCH_RELIEF_M &&
     belowRelief >= BENCH_RELIEF_M
@@ -695,7 +964,7 @@ export function inspectTerrainAt(
       `${aboveRelief.toFixed(1)}m above / ${belowRelief.toFixed(1)}m below`
   } else {
     const fails: string[] = []
-    if (pt.slope >= 10) fails.push(`slope ${pt.slope}° (need <10°)`)
+    if (pt.slope >= 20) fails.push(`slope ${pt.slope}° (need <20°)`)
     if (avgNeighborSlope <= 15) fails.push(`neighbors avg ${avgNeighborSlope.toFixed(0)}° (need >15°)`)
     if (aboveRelief < BENCH_RELIEF_M) fails.push(`above relief ${aboveRelief.toFixed(1)}m (need ≥${BENCH_RELIEF_M}m)`)
     if (belowRelief < BENCH_RELIEF_M) fails.push(`below relief ${belowRelief.toFixed(1)}m (need ≥${BENCH_RELIEF_M}m)`)

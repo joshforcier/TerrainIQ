@@ -7,7 +7,7 @@ import type { PointOfInterest } from '@/data/pointsOfInterest'
 
 export type SidebarTab = 'controls' | 'pois'
 
-export type HuntingPressure = 'low' | 'medium' | 'high'
+export type HuntingPressure = 'low' | 'medium' | 'high' | 'max'
 
 export type BaseLayer = 'streets' | 'satellite' | 'outdoors' | 'hybrid' | 'lidar'
 
@@ -65,7 +65,7 @@ export const useMapStore = defineStore('map', () => {
   )
 
   // Pressure multipliers: scales security up and feeding/travel down at high pressure
-  const pressureModifiers: Record<HuntingPressure, Record<BehaviorLayer, number>> = {
+  const pressureModifiers: Record<Exclude<HuntingPressure, 'max'>, Record<BehaviorLayer, number>> = {
     low:    { feeding: 1.1, water: 1.0, bedding: 0.9, wallows: 1.0, travel: 1.1, security: 0.5 },
     medium: { feeding: 1.0, water: 1.0, bedding: 1.0, wallows: 1.0, travel: 1.0, security: 1.0 },
     high:   { feeding: 0.7, water: 0.8, bedding: 1.1, wallows: 0.6, travel: 0.6, security: 1.5 },
@@ -73,6 +73,9 @@ export const useMapStore = defineStore('map', () => {
 
   // Derived: current behavior weights for active season + time + pressure
   const currentWeights = computed(() => {
+    if (huntingPressure.value === 'max') {
+      return { feeding: 0, water: 0, bedding: 0, wallows: 0, travel: 0, security: 1 }
+    }
     const base = behaviorWeights[season.value][timeOfDay.value]
     const mods = pressureModifiers[huntingPressure.value]
     const result = {} as Record<BehaviorLayer, number>

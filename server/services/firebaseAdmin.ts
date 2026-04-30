@@ -40,7 +40,12 @@ function serviceAccountFromJson(raw: string): ServiceAccount {
 
 function serviceAccountFromEnv(): ServiceAccount | null {
   if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-    return serviceAccountFromJson(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)
+    try {
+      return serviceAccountFromJson(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[firebase-admin] Ignoring invalid FIREBASE_SERVICE_ACCOUNT_KEY: ${message}`)
+    }
   }
 
   const projectId = process.env.FIREBASE_PROJECT_ID ?? process.env.VITE_FIREBASE_PROJECT_ID

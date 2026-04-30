@@ -10,10 +10,24 @@ import type { HuntingPressure } from '@/stores/map'
 
 export type AnalyzedArea = SelectionBounds
 
+export type AnalysisUnitPolygon = {
+  type: 'Polygon' | 'MultiPolygon' | 'Feature'
+  coordinates?: unknown
+  geometry?: {
+    type: 'Polygon' | 'MultiPolygon'
+    coordinates: unknown
+  }
+  properties?: Record<string, unknown>
+}
+
 type ComboKey = `${TimeOfDay}_${HuntingPressure}`
 
 function comboKey(timeOfDay: TimeOfDay, pressure: HuntingPressure): ComboKey {
   return `${timeOfDay}_${pressure}`
+}
+
+function hasMaxPressureCombos(combos: Record<string, PointOfInterest[]>): boolean {
+  return ['dawn_max', 'midday_max', 'dusk_max'].every((key) => Array.isArray(combos[key]))
 }
 
 export function useAIPois(map: ShallowRef<L.Map | null>) {
@@ -52,7 +66,7 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
     return combos
   }
 
-  async function generatePOIs(selectionBounds: SelectionBounds) {
+  async function generatePOIs(selectionBounds: SelectionBounds, unitPolygon?: AnalysisUnitPolygon) {
     if (!map.value) return
 
     loading.value = true
@@ -62,8 +76,8 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
 
     try {
       // Cache hit: load from Firestore instead of calling the API.
-      const cached = analysisStore.findOverlapping(selectionBounds, mapStore.season)
-      if (cached) {
+      const cached = unitPolygon ? null : analysisStore.findOverlapping(selectionBounds, mapStore.season)
+      if (cached && hasMaxPressureCombos(cached.combos)) {
         allCombos.value = hydrateCombos(cached.combos)
         analyzedArea.value = cached.bounds
         fromCache.value = true
@@ -87,6 +101,7 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
           bounds: selectionBounds,
           season: mapStore.season,
           bufferMiles: mapStore.bufferMiles,
+          unitPolygon,
         }),
       })
 
@@ -111,7 +126,7 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
       mapStore.lockSeason()
 
       // Persist for future sessions (silent failure — don't block the user).
-      if (authStore.user?.uid) {
+      if (authStore.user?.uid && !unitPolygon) {
         analysisStore.saveAnalysis({
           userId: authStore.user.uid,
           bounds: selectionBounds,

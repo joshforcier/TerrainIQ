@@ -1,0 +1,67 @@
+[
+  {
+    "id": "saddle-1",
+    "lat": 46.55089,
+    "lng": -111.33667,
+    "expectedFeatures": ["saddle"],
+    "cellSpacingM": 200,
+    "gridSize": 31
+  },
+  {
+    "lat": 46.55907,
+    "lng": -111.32048,
+    "lng": -111.38113,
+    "expectedFeatures": ["saddle"],
+    "cellSpacingM": 200,
+    "gridSize": 31,
+    "requiresMapboxFallback": true
+  },
+  {
+    "id": "saddle-3",
+    "lat": 46.55768,
+    "lng": -111.37055,
+    "expectedFeatures": ["saddle"],
+    "cellSpacingM": 200,
+    "gridSize": 31
+  },
+  {
+    "id": "fingerRidge-1",
+    "lat": 46.54604, 
+    "lng": -111.29870,
+    "expectedFeatures": ["fingerRidge"],
+    "cellSpacingM": 200,
+    "gridSize": 31
+  },
+  {
+    "id": "bench-1",
+    "lat": 46.59369, 
+    "lng": -111.31566,
+    "expectedFeatures": ["bench"],
+    "cellSpacingM": 200,
+    "gridSize": 31
+  },
+  {
+    "id": "ridge-1",
+    "lat": 46.57107, 
+    "lng": -111.30848,
+    "expectedFeatures": ["ridge"],
+    "cellSpacingM": 200,
+    "gridSize": 31
+  },
+  {
+    "id": "drainage-1",
+    "lat": 46.57532, 
+    "lng": -111.28866,
+    "expectedFeatures": ["drainage"],
+    "cellSpacingM": 200,
+    "gridSize": 31
+  },
+  {
+    "id": "nothing-1",
+    "lat": 46.51794, 
+    "lng": -111.28760,
+    "expectedFeatures": [],
+    "cellSpacingM": 200,
+    "gridSize": 31
+  }
+]

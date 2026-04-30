@@ -36,6 +36,20 @@ interface OverpassElement {
   center?: { lat: number; lon: number }
 }
 
+interface GeoJsonLineFeature {
+  type: 'Feature'
+  properties?: Record<string, unknown>
+  geometry?: {
+    type: 'LineString' | 'MultiLineString'
+    coordinates: number[][] | number[][][]
+  }
+}
+
+interface GeoJsonFeatureCollection {
+  type: 'FeatureCollection'
+  features?: GeoJsonLineFeature[]
+}
+
 /**
  * Public Overpass mirrors. The main instance returns 406 / 504 under load,
  * so we try them in order. The first one that returns a 2xx wins.
@@ -54,6 +68,11 @@ const OVERPASS_HEADERS = {
   'User-Agent': 'TerrainIQ/0.1 (+https://github.com/joshforcier/TerrainIQ)',
   Accept: 'application/json',
 } as const
+
+const USFS_ROADS_QUERY_URL =
+  'https://apps.fs.usda.gov/arcx/rest/services/EDW/EDW_RoadBasic_01/MapServer/0/query'
+const USFS_ROADS_PAGE_SIZE = 2000
+const USFS_ROADS_MAX_FEATURES = 6000
 
 async function postOverpass(body: string): Promise<unknown | null> {
   for (const url of OVERPASS_MIRRORS) {
@@ -133,15 +152,103 @@ export async function fetchLandData(bounds: {
 out geom;
 `
 
-  const data = (await postOverpass(`data=${encodeURIComponent(query)}`)) as
-    | { elements: OverpassElement[] }
-    | null
+  const [data, usfsRoads] = await Promise.all([
+    postOverpass(`data=${encodeURIComponent(query)}`) as Promise<{ elements: OverpassElement[] } | null>,
+    fetchUSFSRoads(bounds),
+  ])
 
   if (!data) {
     console.error('All Overpass mirrors failed — returning empty land data')
-    return emptyLandData()
+    return { ...emptyLandData(), roads: usfsRoads }
   }
-  return categorizeElements(data.elements)
+  const landData = categorizeElements(data.elements)
+  landData.roads.push(...usfsRoads)
+  if (usfsRoads.length > 0) {
+    console.log(`USFS roads: added ${usfsRoads.length} National Forest System road segments`)
+  }
+  return landData
+}
+
+async function fetchUSFSRoads(bounds: {
+  north: number
+  south: number
+  east: number
+  west: number
+}): Promise<OSMFeature[]> {
+  const roads: OSMFeature[] = []
+  for (let offset = 0; offset < USFS_ROADS_MAX_FEATURES; offset += USFS_ROADS_PAGE_SIZE) {
+    const params = new URLSearchParams({
+      f: 'geojson',
+      where: '1=1',
+      outFields: 'ID,NAME,SYMBOL_NAME,SURFACE_TYPE,OPER_MAINT_LEVEL,OPENFORUSETO,ROUTE_STATUS',
+      returnGeometry: 'true',
+      geometryType: 'esriGeometryEnvelope',
+      geometry: JSON.stringify({
+        xmin: bounds.west,
+        ymin: bounds.south,
+        xmax: bounds.east,
+        ymax: bounds.north,
+        spatialReference: { wkid: 4326 },
+      }),
+      inSR: '4326',
+      outSR: '4326',
+      spatialRel: 'esriSpatialRelIntersects',
+      resultRecordCount: String(USFS_ROADS_PAGE_SIZE),
+      resultOffset: String(offset),
+    })
+
+    try {
+      const response = await fetch(`${USFS_ROADS_QUERY_URL}?${params.toString()}`, {
+        headers: { Accept: 'application/geo+json, application/json' },
+      })
+      if (!response.ok) {
+        console.warn(`USFS roads returned ${response.status}`)
+        break
+      }
+      const collection = (await response.json()) as GeoJsonFeatureCollection
+      const features = collection.features ?? []
+      roads.push(...features.flatMap(usfsRoadFeatureToOsmFeatures))
+      if (features.length < USFS_ROADS_PAGE_SIZE) break
+    } catch (err) {
+      console.warn('USFS roads fetch error:', err)
+      break
+    }
+  }
+  return roads
+}
+
+function usfsRoadFeatureToOsmFeatures(feature: GeoJsonLineFeature): OSMFeature[] {
+  if (!feature.geometry) return []
+  const name = usfsRoadName(feature.properties)
+  if (feature.geometry.type === 'LineString') {
+    const geometry = lineCoordinatesToLatLng(feature.geometry.coordinates as number[][])
+    return geometry.length >= 2 ? [{ type: 'road', name, geometry }] : []
+  }
+
+  return (feature.geometry.coordinates as number[][][])
+    .map(lineCoordinatesToLatLng)
+    .filter((geometry) => geometry.length >= 2)
+    .map((geometry) => ({ type: 'road', name, geometry }))
+}
+
+function usfsRoadName(properties?: Record<string, unknown>): string | undefined {
+  if (!properties) return 'USFS road'
+  const name = stringProp(properties, 'NAME')
+  const id = stringProp(properties, 'ID')
+  const surface = stringProp(properties, 'SURFACE_TYPE') ?? stringProp(properties, 'SYMBOL_NAME')
+  const base = name || (id ? `USFS ${id}` : 'USFS road')
+  return surface ? `${base} (${surface})` : base
+}
+
+function stringProp(properties: Record<string, unknown>, key: string): string | undefined {
+  const value = properties[key] ?? properties[key.toLowerCase()]
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function lineCoordinatesToLatLng(coordinates: number[][]): Array<{ lat: number; lng: number }> {
+  return coordinates
+    .map((coord) => ({ lng: coord[0], lat: coord[1] }))
+    .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
 }
 
 function emptyLandData(): OSMLandData {
