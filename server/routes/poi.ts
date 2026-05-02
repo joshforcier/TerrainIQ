@@ -34,10 +34,18 @@ import {
 } from '../services/highResTerrain.js'
 import {
   checkAndIncrementUsage,
+  getUsage,
   estimateOpenAICostUsd,
   recordOpenAITokenUsage,
   type OpenAITokenUsageEntry,
 } from '../services/usage.js'
+import {
+  getAnalysisCache,
+  saveAnalysisCache,
+  ANALYSIS_CACHE_VERSION,
+  ANALYSIS_CACHE_TTL_DAYS,
+  type CachedCombos,
+} from '../services/analysisCache.js'
 import type { AuthedRequest } from '../middleware/auth.js'
 
 function getClient(): OpenAI {
@@ -604,6 +612,7 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
   }
 
   const { bounds, bufferMiles: rawBuffer, unitPolygon: rawUnitPolygon } = req.body as GeneratePOIRequest
+  const season = (req.body as GeneratePOIRequest).season || 'rut'
 
   // Clamp buffer to 0.1–2.0 miles
   const bufferMiles = Math.max(0.1, Math.min(2.0, rawBuffer ?? DEFAULT_BUFFER_MILES))
@@ -642,6 +651,37 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
       error: 'Selected area is outside known elk range. Pick an area in the Rocky Mountains, Pacific Northwest, or a known reintroduction pocket.'
     })
     return
+  }
+
+  if (!unitPolygon) {
+    try {
+      const cachedCombos = await getAnalysisCache({ bounds, season, bufferMiles })
+      if (cachedCombos) {
+        const usage = await getUsage(uid)
+        if (usage.limit <= 0) {
+          res.status(402).json({
+            error: 'An active subscription is required to run analyses.',
+            code: 'LIMIT_EXCEEDED',
+          })
+          return
+        }
+
+        console.log(
+          `[analysis-cache] hit v${ANALYSIS_CACHE_VERSION}, ttl=${ANALYSIS_CACHE_TTL_DAYS}d, season=${season}, buffer=${bufferMiles.toFixed(2)}`,
+        )
+        res.json({
+          combos: cachedCombos,
+          season,
+          usage,
+          fromCache: true,
+          cacheSource: 'shared',
+          cacheVersion: ANALYSIS_CACHE_VERSION,
+        })
+        return
+      }
+    } catch (err) {
+      console.error('[analysis-cache] read failed; falling back to generation:', err)
+    }
   }
 
   // ── Plan check + atomic usage increment ──
@@ -819,11 +859,9 @@ ${features.join('\n')}
 
     type ComboKey = `${typeof TIMES[number]}_${typeof PRESSURES[number]}`
     type Pressure = typeof PRESSURES[number]
-    const comboResults: Record<string, unknown[]> = {}
+    const comboResults: CachedCombos = {}
     const openaiUsageEntries: OpenAITokenUsageEntry[] = []
 
-    // Season is fixed from the request body
-    const season = (req.body as GeneratePOIRequest).season || 'rut'
     const comboPlans: Array<{
       timeOfDay: typeof TIMES[number] | 'any'
       pressure: Pressure
@@ -1285,7 +1323,18 @@ ${features.join('\n')}
       }
     }
 
-    res.json({ combos: comboResults, season, usage })
+    if (!unitPolygon) {
+      try {
+        await saveAnalysisCache({ bounds, season, bufferMiles, combos: comboResults })
+        console.log(
+          `[analysis-cache] saved v${ANALYSIS_CACHE_VERSION}, ttl=${ANALYSIS_CACHE_TTL_DAYS}d, season=${season}, buffer=${bufferMiles.toFixed(2)}`,
+        )
+      } catch (err) {
+        console.error('[analysis-cache] save failed:', err)
+      }
+    }
+
+    res.json({ combos: comboResults, season, usage, fromCache: false })
   } catch (err: unknown) {
     console.error('POI generation error:', err)
     const message = err instanceof Error ? err.message : 'Unknown error'

@@ -13,7 +13,11 @@ export type BaseLayer = 'streets' | 'satellite' | 'outdoors' | 'hybrid' | 'lidar
 
 export const useMapStore = defineStore('map', () => {
   // Map view state — centered on Flat Tops, CO
-  const center = ref<LatLng>({ lat: 39.955, lng: -107.14 })
+  const center = ref<LatLng>(
+    import.meta.env.DEV
+      ? { lat: 41.10594, lng: -106.68388 }
+      : { lat: 39.955, lng: -107.14 },
+  )
   const zoom = ref(13)
   const baseLayer = ref<BaseLayer>('satellite')
 
@@ -25,7 +29,6 @@ export const useMapStore = defineStore('map', () => {
   const showHeatmap = ref(false)
   const bufferMiles = ref(0.5) // road/trail/building buffer in miles
   const huntingPressure = ref<HuntingPressure>('medium')
-  const seasonLocked = ref(false)
 
   // POI presentation state (POI list lives in useAIPois; mirrored here so the
   // sidebar and detail panel can read it without a direct composable dependency)
@@ -91,17 +94,7 @@ export const useMapStore = defineStore('map', () => {
   }
 
   function setSeason(s: Season) {
-    if (!seasonLocked.value) {
-      season.value = s
-    }
-  }
-
-  function lockSeason() {
-    seasonLocked.value = true
-  }
-
-  function unlockSeason() {
-    seasonLocked.value = false
+    season.value = s
   }
 
   function setTimeOfDay(t: TimeOfDay) {
@@ -188,7 +181,6 @@ export const useMapStore = defineStore('map', () => {
     showHeatmap,
     bufferMiles,
     huntingPressure,
-    seasonLocked,
     currentWeights,
     currentPois,
     pinnedPoiId,
@@ -204,8 +196,6 @@ export const useMapStore = defineStore('map', () => {
     toggleBehavior,
     setIntensity,
     setHuntingPressure,
-    lockSeason,
-    unlockSeason,
     setCurrentPois,
     pinPoi,
     setHoveredPoi,

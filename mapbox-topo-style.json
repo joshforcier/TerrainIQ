@@ -1,0 +1,382 @@
+{
+  "version": 8,
+  "name": "RidgeRead Topo Feet",
+  "glyphs": "mapbox://fonts/mapbox/{fontstack}/{range}.pbf",
+  "sprite": "mapbox://sprites/mapbox/outdoors-v12",
+  "sources": {
+    "terrain": {
+      "type": "vector",
+      "url": "mapbox://mapbox.mapbox-terrain-v2"
+    },
+    "streets": {
+      "type": "vector",
+      "url": "mapbox://mapbox.mapbox-streets-v8"
+    }
+  },
+  "layers": [
+    {
+      "id": "land",
+      "type": "background",
+      "paint": {
+        "background-color": "#e3dfc7"
+      }
+    },
+    {
+      "id": "terrain-landcover-base",
+      "type": "fill",
+      "source": "terrain",
+      "source-layer": "landcover",
+      "filter": ["in", "class", "wood", "scrub", "grass", "crop", "snow"],
+      "paint": {
+        "fill-color": [
+          "match",
+          ["get", "class"],
+          "wood", "#aebf8d",
+          "scrub", "#c3bf8d",
+          "grass", "#cad28e",
+          "crop", "#d0c986",
+          "snow", "#eef0e6",
+          "#c5ca95"
+        ],
+        "fill-opacity": 0.34
+      }
+    },
+    {
+      "id": "landcover-wood",
+      "type": "fill",
+      "source": "streets",
+      "source-layer": "landuse",
+      "filter": ["in", "class", "wood", "park", "scrub", "grass"],
+      "paint": {
+        "fill-color": [
+          "match",
+          ["get", "class"],
+          "wood", "#b8c69a",
+          "scrub", "#c8c399",
+          "park", "#c2d29c",
+          "grass", "#d0d6a5",
+          "#c8d0a0"
+        ],
+        "fill-opacity": 0.7
+      }
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "streets",
+      "source-layer": "water",
+      "paint": {
+        "fill-color": "#96bdd1"
+      }
+    },
+    {
+      "id": "hillshade-light",
+      "type": "fill",
+      "source": "terrain",
+      "source-layer": "hillshade",
+      "filter": ["in", "level", 89, 90, 91, 92, 93, 94],
+      "paint": {
+        "fill-color": "rgba(255,255,255,0.22)",
+        "fill-antialias": false
+      }
+    },
+    {
+      "id": "hillshade-dark",
+      "type": "fill",
+      "source": "terrain",
+      "source-layer": "hillshade",
+      "filter": ["in", "level", 56, 57, 58, 67, 68, 69, 78, 79, 80],
+      "paint": {
+        "fill-color": [
+          "interpolate", ["linear"], ["get", "level"],
+          56, "rgba(80,67,47,0.24)",
+          80, "rgba(80,67,47,0.08)"
+        ],
+        "fill-antialias": false
+      }
+    },
+    {
+      "id": "elevation-color-wash",
+      "type": "line",
+      "source": "terrain",
+      "source-layer": "contour",
+      "filter": ["all", ["!=", "index", -1]],
+      "paint": {
+        "line-color": [
+          "interpolate",
+          ["linear"],
+          ["get", "ele"],
+          900, "#8fb08a",
+          1400, "#b6bd83",
+          1900, "#d0b46e",
+          2400, "#c28c64",
+          3000, "#a66f62",
+          3600, "#8b6d78"
+        ],
+        "line-opacity": ["interpolate", ["linear"], ["zoom"], 8, 0.24, 13, 0.15, 16, 0.09],
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.9, 12, 1.8, 15, 3.1],
+        "line-blur": 1.2
+      },
+      "minzoom": 8
+    },
+    {
+      "id": "contour-lines",
+      "type": "line",
+      "source": "terrain",
+      "source-layer": "contour",
+      "filter": ["all", ["!=", "index", -1], ["!=", "index", 10]],
+      "paint": {
+        "line-color": "rgba(126, 95, 52, 0.55)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.35, 15, 0.8]
+      },
+      "minzoom": 10
+    },
+    {
+      "id": "contour-lines-index",
+      "type": "line",
+      "source": "terrain",
+      "source-layer": "contour",
+      "filter": ["all", ["!=", "index", -1], ["==", "index", 10]],
+      "paint": {
+        "line-color": "rgba(105, 75, 38, 0.85)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.65, 15, 1.35]
+      },
+      "minzoom": 9
+    },
+    {
+      "id": "contour-labels-feet",
+      "type": "symbol",
+      "source": "terrain",
+      "source-layer": "contour",
+      "filter": ["all", ["!=", "index", -1], [">=", "index", 5]],
+      "layout": {
+        "text-field": [
+          "concat",
+          ["to-string", ["round", ["*", ["get", "ele"], 3.28084]]],
+          " ft"
+        ],
+        "text-font": ["DIN Pro Medium", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 12, 9, 16, 11],
+        "symbol-placement": "line",
+        "text-max-angle": 25,
+        "text-padding": 5
+      },
+      "paint": {
+        "text-color": "rgba(89, 62, 31, 0.95)",
+        "text-halo-color": "rgba(238, 231, 207, 0.95)",
+        "text-halo-width": 1.5
+      },
+      "minzoom": 13
+    },
+    {
+      "id": "waterway",
+      "type": "line",
+      "source": "streets",
+      "source-layer": "waterway",
+      "paint": {
+        "line-color": "#5f9bb8",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.45, 16, 2]
+      }
+    },
+    {
+      "id": "road-trail",
+      "type": "line",
+      "source": "streets",
+      "source-layer": "road",
+      "filter": ["in", "class", "path", "track"],
+      "paint": {
+        "line-color": "rgba(98, 82, 62, 0.55)",
+        "line-width": 1,
+        "line-dasharray": [2, 2]
+      },
+      "minzoom": 12
+    },
+    {
+      "id": "road-minor",
+      "type": "line",
+      "source": "streets",
+      "source-layer": "road",
+      "filter": ["in", "class", "service", "street"],
+      "paint": {
+        "line-color": "rgba(114, 94, 70, 0.55)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.5, 16, 1.5]
+      },
+      "minzoom": 12
+    },
+    {
+      "id": "road-major",
+      "type": "line",
+      "source": "streets",
+      "source-layer": "road",
+      "filter": ["in", "class", "primary", "secondary", "tertiary", "trunk", "motorway"],
+      "paint": {
+        "line-color": "rgba(93, 72, 48, 0.85)",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.6, 16, 2.4]
+      }
+    },
+    {
+      "id": "water-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "water",
+      "filter": ["has", "name"],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Italic", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 9, 10, 14, 13],
+        "text-letter-spacing": 0.05,
+        "symbol-placement": "point",
+        "text-padding": 8
+      },
+      "paint": {
+        "text-color": "rgba(43, 97, 125, 0.9)",
+        "text-halo-color": "rgba(238, 231, 207, 0.85)",
+        "text-halo-width": 1.2
+      },
+      "minzoom": 8
+    },
+    {
+      "id": "waterway-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "waterway",
+      "filter": ["has", "name"],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Italic", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 12, 9, 16, 12],
+        "symbol-placement": "line",
+        "text-max-angle": 35,
+        "text-padding": 6
+      },
+      "paint": {
+        "text-color": "rgba(43, 97, 125, 0.9)",
+        "text-halo-color": "rgba(238, 231, 207, 0.85)",
+        "text-halo-width": 1.1
+      },
+      "minzoom": 12
+    },
+    {
+      "id": "road-major-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "road",
+      "filter": ["all", ["has", "name"], ["in", "class", "primary", "secondary", "tertiary", "trunk", "motorway"]],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Medium", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 10, 9, 15, 12],
+        "symbol-placement": "line",
+        "text-max-angle": 30,
+        "text-padding": 6
+      },
+      "paint": {
+        "text-color": "rgba(72, 55, 35, 0.95)",
+        "text-halo-color": "rgba(238, 231, 207, 0.9)",
+        "text-halo-width": 1.4
+      },
+      "minzoom": 10
+    },
+    {
+      "id": "road-minor-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "road",
+      "filter": ["all", ["has", "name"], ["in", "class", "service", "street"]],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Regular", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 13, 8.5, 16, 11],
+        "symbol-placement": "line",
+        "text-max-angle": 30,
+        "text-padding": 4
+      },
+      "paint": {
+        "text-color": "rgba(88, 69, 45, 0.85)",
+        "text-halo-color": "rgba(238, 231, 207, 0.85)",
+        "text-halo-width": 1.2
+      },
+      "minzoom": 13
+    },
+    {
+      "id": "trail-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "road",
+      "filter": ["all", ["has", "name"], ["in", "class", "path", "track"]],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Regular", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 13, 8, 16, 10.5],
+        "symbol-placement": "line",
+        "text-max-angle": 35,
+        "text-padding": 4
+      },
+      "paint": {
+        "text-color": "rgba(80, 69, 55, 0.8)",
+        "text-halo-color": "rgba(238, 231, 207, 0.8)",
+        "text-halo-width": 1
+      },
+      "minzoom": 13
+    },
+    {
+      "id": "natural-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "natural_label",
+      "filter": ["has", "name"],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Medium", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 10, 9, 15, 12],
+        "text-letter-spacing": 0.04,
+        "text-padding": 7
+      },
+      "paint": {
+        "text-color": "rgba(74, 94, 53, 0.92)",
+        "text-halo-color": "rgba(238, 231, 207, 0.9)",
+        "text-halo-width": 1.2
+      },
+      "minzoom": 10
+    },
+    {
+      "id": "place-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "place_label",
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Bold", "Arial Unicode MS Bold"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 8, 10, 14, 14]
+      },
+      "paint": {
+        "text-color": "rgba(60, 50, 39, 0.95)",
+        "text-halo-color": "rgba(238, 231, 207, 0.9)",
+        "text-halo-width": 1.2
+      }
+    },
+    {
+      "id": "poi-labels",
+      "type": "symbol",
+      "source": "streets",
+      "source-layer": "poi_label",
+      "filter": ["<=", "filterrank", 2],
+      "layout": {
+        "text-field": ["get", "name"],
+        "text-font": ["DIN Pro Regular", "Arial Unicode MS Regular"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 13, 9, 16, 11],
+        "icon-image": ["get", "maki"],
+        "icon-size": 0.7,
+        "text-offset": [0, 0.8],
+        "text-anchor": "top",
+        "text-padding": 6
+      },
+      "paint": {
+        "text-color": "rgba(63, 55, 43, 0.82)",
+        "text-halo-color": "rgba(238, 231, 207, 0.88)",
+        "text-halo-width": 1
+      },
+      "minzoom": 14
+    }
+  ]
+}

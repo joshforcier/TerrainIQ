@@ -15,7 +15,6 @@ import { useScoutWaypointsStore } from '@/stores/scoutWaypoints'
 import L from 'leaflet'
 import type { HoverScores } from '@/composables/useHoverInfo'
 import { useMapStore, type BaseLayer, type HuntingPressure } from '@/stores/map'
-import { downloadGpx } from '@/utils/exportGpx'
 import { isInElkRange } from '@/utils/elkRange'
 import type { PointOfInterest } from '@/data/pointsOfInterest'
 import type { TimeOfDay } from '@/data/elkBehavior'
@@ -279,8 +278,8 @@ const selectionOutsideElkRange = computed(() => {
 type Mode = 'idle' | 'selecting' | 'placed' | 'analyzing' | 'done'
 
 const mode = computed<Mode>(() => {
-  if (hasResults.value) return 'done'
   if (aiLoading.value) return 'analyzing'
+  if (hasResults.value) return 'done'
   if (selectionLocked.value) return 'placed'
   if (selectionActive.value) return 'selecting'
   return 'idle'
@@ -321,16 +320,6 @@ function analyzeArea() {
 
 function resetAll() {
   mapContainerRef.value?.resetAll()
-}
-
-function exportGpx() {
-  const pois = mapContainerRef.value?.pois as PointOfInterest[] | undefined
-  if (!pois || pois.length === 0) return
-  downloadGpx(pois, {
-    season: mapStore.season,
-    timeOfDay: mapStore.timeOfDay,
-    pressure: mapStore.huntingPressure,
-  })
 }
 
 function clearKept() {
@@ -601,10 +590,6 @@ onBeforeUnmount(() => {
           <p class="step-disclaimer">
             High-probability terrain for the selected season, time, and pressure.
           </p>
-          <button class="map-btn map-btn--ghost map-btn--sm" @click="exportGpx">
-            <q-icon name="download" size="14px" />
-            Export GPX (OnX)
-          </button>
           <button class="map-btn map-btn--ghost map-btn--sm" @click="resetAll">
             <q-icon name="restart_alt" size="14px" />
             New Selection

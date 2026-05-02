@@ -8,8 +8,8 @@
     "gridSize": 31
   },
   {
-    "lat": 46.55907,
-    "lng": -111.32048,
+    "id": "saddle-2",
+    "lat": 46.53739,
     "lng": -111.38113,
     "expectedFeatures": ["saddle"],
     "cellSpacingM": 200,
@@ -34,8 +34,8 @@
   },
   {
     "id": "bench-1",
-    "lat": 46.59369, 
-    "lng": -111.31566,
+    "lat": 46.55907,
+    "lng": -111.32048,
     "expectedFeatures": ["bench"],
     "cellSpacingM": 200,
     "gridSize": 31

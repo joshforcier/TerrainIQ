@@ -104,21 +104,17 @@ function setBufferMiles(value: number | null) {
               <span class="section-num">01</span>
               Season Phase
             </div>
-            <div class="toggle-group" :class="{ 'toggle-group--locked': mapStore.seasonLocked }">
+            <div class="toggle-group">
               <button
                 v-for="opt in seasonOptions"
                 :key="opt.value"
                 class="toggle-btn"
                 :class="{ 'toggle-btn--active': mapStore.season === opt.value }"
-                :disabled="mapStore.seasonLocked"
                 @click="mapStore.setSeason(opt.value)"
               >
                 {{ opt.label }}
               </button>
             </div>
-            <p v-if="mapStore.seasonLocked" class="lock-hint">
-              <q-icon name="lock" size="11px" /> Locked after analysis
-            </p>
           </div>
 
           <!-- Time of Day -->
@@ -406,20 +402,6 @@ function setBufferMiles(value: number | null) {
   background: rgba(248, 113, 113, 0.18);
   color: #f87171;
   border: 1px solid rgba(248, 113, 113, 0.38);
-}
-
-.toggle-group--locked {
-  opacity: 0.5;
-  pointer-events: none;
-}
-
-.lock-hint {
-  font-size: 10px;
-  color: #4a5e70;
-  margin: 6px 0 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 .max-pressure-hint,

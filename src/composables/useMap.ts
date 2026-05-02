@@ -3,6 +3,9 @@ import L from 'leaflet'
 import { useMapStore, type BaseLayer } from '@/stores/map'
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string
+const MAPBOX_TOPO_STYLE = (import.meta.env.VITE_MAPBOX_TOPO_STYLE as string | undefined)
+  || 'mapbox://styles/joshforcier/cmolyfzwi008901s72vbdddmd'
+const MAPBOX_HYBRID_STYLE = 'joshforcier/cmnyygiw9006x01qv8bpg574v'
 
 interface LayerDef {
   kind?: 'tile' | 'arcgis-export'
@@ -18,8 +21,9 @@ interface LayerDef {
 type TileCoords = { x: number; y: number; z: number }
 
 function mapboxLayer(style: string, opacity?: number): LayerDef {
+  const stylePath = style.replace(/^mapbox:\/\/styles\//, '')
   return {
-    url: `https://api.mapbox.com/styles/v1/${style}/tiles/512/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
+    url: `https://api.mapbox.com/styles/v1/${stylePath}/tiles/512/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
     attribution: '&copy; <a href="https://www.mapbox.com/">Mapbox</a>',
     tileSize: 512,
     zoomOffset: -1,
@@ -31,15 +35,8 @@ function mapboxLayer(style: string, opacity?: number): LayerDef {
 const layerDefs: Record<BaseLayer, LayerDef[]> = {
   streets: [mapboxLayer('mapbox/streets-v12')],
   satellite: [mapboxLayer('mapbox/satellite-v9')],
-  outdoors: [{
-    url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
-    attribution: 'Topo &copy; <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map">USGS The National Map</a>',
-    tileSize: 256,
-    zoomOffset: 0,
-    maxZoom: 22,
-    maxNativeZoom: 16,
-  }],
-  hybrid: [mapboxLayer('joshforcier/cmnyygiw9006x01qv8bpg574v')],
+  outdoors: [mapboxLayer(MAPBOX_TOPO_STYLE)],
+  hybrid: [mapboxLayer(MAPBOX_HYBRID_STYLE)],
   // USGS 3DEP LIDAR-derived shaded relief. The cached `/tile/{z}/{y}/{x}`
   // endpoint advertises deep zoom levels but returns 404 for many normal
   // Web Mercator tile coordinates, which makes Leaflet show grey tiles.

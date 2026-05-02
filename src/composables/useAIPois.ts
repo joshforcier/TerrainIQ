@@ -1,11 +1,11 @@
-import { ref, computed, type ShallowRef } from 'vue'
+import { ref, computed, watch, onUnmounted, type ShallowRef } from 'vue'
 import type L from 'leaflet'
 import type { PointOfInterest } from '@/data/pointsOfInterest'
 import { useMapStore } from '@/stores/map'
 import { useAuthStore } from '@/stores/auth'
 import { useAnalysisStore } from '@/stores/analysis'
 import type { SelectionBounds } from './useSelectionBox'
-import type { TimeOfDay } from '@/data/elkBehavior'
+import type { Season, TimeOfDay } from '@/data/elkBehavior'
 import type { HuntingPressure } from '@/stores/map'
 
 export type AnalyzedArea = SelectionBounds
@@ -30,6 +30,16 @@ function hasMaxPressureCombos(combos: Record<string, PointOfInterest[]>): boolea
   return ['dawn_max', 'midday_max', 'dusk_max'].every((key) => Array.isArray(combos[key]))
 }
 
+function boundsFromMap(map: L.Map): SelectionBounds {
+  const bounds = map.getBounds()
+  return {
+    north: bounds.getNorth(),
+    south: bounds.getSouth(),
+    east: bounds.getEast(),
+    west: bounds.getWest(),
+  }
+}
+
 export function useAIPois(map: ShallowRef<L.Map | null>) {
   const mapStore = useMapStore()
   const authStore = useAuthStore()
@@ -42,11 +52,14 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
   const error = ref<string | null>(null)
   const errorCode = ref<string | null>(null)
   const analyzedArea = ref<AnalyzedArea | null>(null)
+  const analyzedSeason = ref<Season | null>(null)
   /** True when the current results came from cache (not a fresh API call) */
   const fromCache = ref(false)
 
   /** Whether we have analysis results loaded */
-  const hasResults = computed(() => Object.keys(allCombos.value).length > 0)
+  const hasResults = computed(() => (
+    analyzedSeason.value === mapStore.season && Object.keys(allCombos.value).length > 0
+  ))
 
   /** The active POI set for the current time + pressure selection */
   const pois = computed<PointOfInterest[]>(() => {
@@ -66,6 +79,24 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
     return combos
   }
 
+  function loadSavedAnalysisIntoMap(selectionBounds: SelectionBounds, options: { replaceActive?: boolean } = {}): boolean {
+    if (loading.value && !options.replaceActive) return false
+    if (hasResults.value && !options.replaceActive) return false
+    const cached = analysisStore.findOverlapping(selectionBounds, mapStore.season)
+    if (!cached || !hasMaxPressureCombos(cached.combos)) return false
+
+    allCombos.value = hydrateCombos(cached.combos)
+    analyzedArea.value = cached.bounds
+    analyzedSeason.value = cached.season
+    fromCache.value = true
+    return true
+  }
+
+  function loadSavedAnalysisForCurrentMap() {
+    if (!map.value) return
+    loadSavedAnalysisIntoMap(boundsFromMap(map.value))
+  }
+
   async function generatePOIs(selectionBounds: SelectionBounds, unitPolygon?: AnalysisUnitPolygon) {
     if (!map.value) return
 
@@ -78,10 +109,7 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
       // Cache hit: load from Firestore instead of calling the API.
       const cached = unitPolygon ? null : analysisStore.findOverlapping(selectionBounds, mapStore.season)
       if (cached && hasMaxPressureCombos(cached.combos)) {
-        allCombos.value = hydrateCombos(cached.combos)
-        analyzedArea.value = cached.bounds
-        fromCache.value = true
-        mapStore.lockSeason()
+        loadSavedAnalysisIntoMap(selectionBounds, { replaceActive: true })
         return
       }
 
@@ -123,7 +151,8 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
 
       allCombos.value = combos
       analyzedArea.value = selectionBounds
-      mapStore.lockSeason()
+      analyzedSeason.value = mapStore.season
+      fromCache.value = Boolean(data.fromCache)
 
       // Persist for future sessions (silent failure — don't block the user).
       if (authStore.user?.uid && !unitPolygon) {
@@ -147,16 +176,49 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
   function clearPOIs() {
     allCombos.value = {}
     analyzedArea.value = null
+    analyzedSeason.value = null
     error.value = null
     errorCode.value = null
     fromCache.value = false
-    mapStore.unlockSeason()
   }
 
   function clearError() {
     error.value = null
     errorCode.value = null
   }
+
+  watch(
+    () => [map.value, analysisStore.savedAnalyses.length, mapStore.season] as const,
+    () => loadSavedAnalysisForCurrentMap(),
+    { immediate: true },
+  )
+
+  watch(
+    () => mapStore.season,
+    () => {
+      if (loading.value) return
+      if (!hasResults.value) {
+        allCombos.value = {}
+        analyzedArea.value = null
+        analyzedSeason.value = null
+        fromCache.value = false
+      }
+      loadSavedAnalysisForCurrentMap()
+    },
+  )
+
+  watch(
+    () => map.value,
+    (current, previous) => {
+      if (previous) previous.off('moveend zoomend', loadSavedAnalysisForCurrentMap)
+      if (current) current.on('moveend zoomend', loadSavedAnalysisForCurrentMap)
+    },
+    { immediate: true },
+  )
+
+  onUnmounted(() => {
+    map.value?.off('moveend zoomend', loadSavedAnalysisForCurrentMap)
+  })
 
   return {
     pois,

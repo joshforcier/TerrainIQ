@@ -2,6 +2,8 @@
 import { computed } from 'vue'
 import { useMapStore } from '@/stores/map'
 import { behaviorColors, behaviorLabels, type BehaviorLayer } from '@/data/elkBehavior'
+import type { PointOfInterest } from '@/data/pointsOfInterest'
+import { downloadGpx } from '@/utils/exportGpx'
 import {
   deriveConfidence,
   dominantBehavior,
@@ -34,6 +36,7 @@ interface RankedRow {
   label: string
   gradeC: string
   dominant: BehaviorLayer
+  poi: PointOfInterest
 }
 
 const rows = computed<RankedRow[]>(() => {
@@ -52,10 +55,20 @@ const rows = computed<RankedRow[]>(() => {
       label: grade.label,
       gradeC: gradeColor(grade.grade),
       dominant: dom,
+      poi,
     })
   }
   return list.sort((a, b) => b.score - a.score)
 })
+
+function exportRowsGpx() {
+  if (rows.value.length === 0) return
+  downloadGpx(rows.value.map((row) => row.poi), {
+    season: mapStore.season,
+    timeOfDay: mapStore.timeOfDay,
+    pressure: mapStore.huntingPressure,
+  })
+}
 
 function onHover(id: string | null) {
   mapStore.setHoveredPoi(id)
@@ -75,8 +88,14 @@ function onClick(id: string) {
       </div>
 
       <div v-else class="rank-summary">
-        <span class="rank-summary-num">{{ rows.length }}</span>
-        <span class="rank-summary-label">visible POIs</span>
+        <div class="rank-summary-count">
+          <span class="rank-summary-num">{{ rows.length }}</span>
+          <span class="rank-summary-label">visible POIs</span>
+        </div>
+        <button class="rank-export" type="button" title="Export ranked POIs as GPX" @click="exportRowsGpx">
+          <q-icon name="download" size="14px" />
+          <span>GPX</span>
+        </button>
       </div>
 
       <ul class="rank-list">
@@ -114,6 +133,10 @@ function onClick(id: string) {
 <style scoped>
 .ranked-content {
   padding: 12px 10px 16px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .empty {
@@ -132,12 +155,24 @@ function onClick(id: string) {
 }
 
 .rank-summary {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
   padding: 6px 10px 12px;
   border-bottom: 1px solid var(--bd-0, #1a2735);
   margin-bottom: 8px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.rank-summary-count {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .rank-summary-num {
@@ -154,6 +189,35 @@ function onClick(id: string) {
   letter-spacing: 0.18em;
   color: var(--fg-3, #556676);
   text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rank-export {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  min-height: 28px;
+  min-width: 58px;
+  padding: 0 8px;
+  border: 1px solid rgba(232, 197, 71, 0.28);
+  border-radius: 6px;
+  background: rgba(232, 197, 71, 0.08);
+  color: var(--amber, #e8c547);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.rank-export:hover {
+  background: rgba(232, 197, 71, 0.14);
+  border-color: rgba(232, 197, 71, 0.46);
+  color: #f1d96c;
 }
 
 .rank-list {
@@ -163,17 +227,24 @@ function onClick(id: string) {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .rank-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 8px 10px;
   border-radius: 6px;
   border: 1px solid transparent;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .rank-row:hover,
@@ -194,6 +265,7 @@ function onClick(id: string) {
   width: 18px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+  flex: 0 0 18px;
 }
 
 .rank-grade {
@@ -210,8 +282,10 @@ function onClick(id: string) {
 }
 
 .rank-info {
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+  width: 0;
+  overflow: hidden;
 }
 
 .rank-name {
@@ -221,6 +295,7 @@ function onClick(id: string) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .rank-meta {
@@ -230,6 +305,8 @@ function onClick(id: string) {
   font-size: 10.5px;
   color: var(--fg-3, #556676);
   margin-top: 2px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .rank-dot {
@@ -241,6 +318,10 @@ function onClick(id: string) {
 
 .rank-meta-label {
   font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rank-meta-sep {

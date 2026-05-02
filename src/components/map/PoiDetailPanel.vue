@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useMapStore } from '@/stores/map'
+import { useAnalysisStore } from '@/stores/analysis'
+import { useScoutWaypointsStore } from '@/stores/scoutWaypoints'
 import { behaviorColors, behaviorLabels, type BehaviorLayer } from '@/data/elkBehavior'
 import {
   deriveConfidence,
@@ -11,6 +13,8 @@ import {
 import CoordinateChip from '@/components/common/CoordinateChip.vue'
 
 const mapStore = useMapStore()
+const analysisStore = useAnalysisStore()
+const scoutWaypointsStore = useScoutWaypointsStore()
 
 const enabledLayers = computed<EnabledLayers>(() => {
   if (mapStore.huntingPressure === 'max') {
@@ -49,9 +53,20 @@ function close() {
   mapStore.pinPoi(null)
 }
 
-function deletePoi() {
-  if (!mapStore.pinnedPoi) return
-  mapStore.deletePoi(mapStore.pinnedPoi.id)
+async function deletePoi() {
+  const poi = mapStore.pinnedPoi
+  if (!poi) return
+  mapStore.deletePoi(poi.id)
+
+  try {
+    await analysisStore.deleteSavedPoi(poi)
+    if (scoutWaypointsStore.waypoints.some((waypoint) => waypoint.id === poi.id)) {
+      await scoutWaypointsStore.deleteOne(poi.id)
+    }
+  } catch {
+    // Keep the optimistic local delete; the analysis store logs and refreshes
+    // saved analyses if Firestore rejects the persisted update.
+  }
 }
 </script>
 
@@ -174,7 +189,7 @@ function deletePoi() {
       </section>
 
       <div class="poi-actions">
-        <button class="delete-btn" @click="deletePoi" title="Hide this POI from the map">
+        <button class="delete-btn" @click="deletePoi" title="Delete this POI from saved data and hide it from the map">
           <q-icon name="delete_outline" size="14px" />
           <span>Delete POI</span>
         </button>

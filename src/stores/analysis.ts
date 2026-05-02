@@ -2,10 +2,12 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import {
   collection,
+  doc,
   query,
   where,
   getDocs,
   addDoc,
+  updateDoc,
   serverTimestamp,
 } from 'firebase/firestore'
 import { db } from '@/config/firebase'
@@ -41,6 +43,10 @@ function overlapRatio(a: AnalysisBounds, b: AnalysisBounds): number {
   const interArea = approxArea(inter)
   const minArea = Math.min(approxArea(a), approxArea(b))
   return minArea === 0 ? 0 : interArea / minArea
+}
+
+function poiCoordKey(poi: Pick<PointOfInterest, 'lat' | 'lng'>): string {
+  return `${poi.lat.toFixed(5)},${poi.lng.toFixed(5)}`
 }
 
 export const useAnalysisStore = defineStore('analysis', () => {
@@ -129,6 +135,44 @@ export const useAnalysisStore = defineStore('analysis', () => {
     }
   }
 
+  async function deleteSavedPoi(poi: PointOfInterest): Promise<void> {
+    const authStore = useAuthStore()
+    const uid = authStore.user?.uid
+    if (!uid) return
+
+    const targetCoord = poiCoordKey(poi)
+    const updates: Promise<void>[] = []
+    const nextSavedAnalyses = savedAnalyses.value.map((analysis) => {
+      if (analysis.userId !== uid) return analysis
+
+      let changed = false
+      const combos: Record<string, PointOfInterest[]> = {}
+      for (const [key, pois] of Object.entries(analysis.combos || {})) {
+        const filtered = pois.filter((candidate) => {
+          const samePoi = candidate.id === poi.id || poiCoordKey(candidate) === targetCoord
+          if (samePoi) changed = true
+          return !samePoi
+        })
+        combos[key] = filtered
+      }
+
+      if (!changed) return analysis
+      updates.push(updateDoc(doc(db, 'analyses', analysis.id), { combos }))
+      return { ...analysis, combos }
+    })
+
+    if (updates.length === 0) return
+    savedAnalyses.value = nextSavedAnalyses
+    try {
+      await Promise.all(updates)
+    } catch (err: unknown) {
+      savedError.value = err instanceof Error ? err.message : 'Failed to delete saved POI'
+      console.error('deleteSavedPoi error:', err)
+      await loadSaved(uid)
+      throw err
+    }
+  }
+
   function findOverlapping(bounds: AnalysisBounds, season: Season): SavedAnalysis | null {
     let best: SavedAnalysis | null = null
     let bestRatio = OVERLAP_THRESHOLD
@@ -169,6 +213,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
     savedLoading,
     savedError,
     saveAnalysis,
+    deleteSavedPoi,
     findOverlapping,
     loadSaved,
   }
