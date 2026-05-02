@@ -183,12 +183,11 @@ const pricingTiers: PricingTier[] = [
           <q-btn
             color="amber"
             text-color="dark"
-            icon="login"
-            label="Get Started with Google"
+            label="Start Free Trial"
             no-caps
             unelevated
             size="lg"
-            class="text-weight-bold cta-btn"
+            class="text-weight-bold pricing-cta hero-primary-cta"
             @click="signIn"
           />
           <q-btn
@@ -503,6 +502,13 @@ const pricingTiers: PricingTier[] = [
 .cta-btn {
   padding: 12px 32px;
   font-size: 16px;
+  border-radius: 8px;
+}
+
+.hero-primary-cta {
+  min-width: 184px;
+  padding: 12px 28px;
+  font-size: 15px;
   border-radius: 8px;
 }
 
