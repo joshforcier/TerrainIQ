@@ -6,7 +6,6 @@ import InfoPanel from '@/components/map/InfoPanel.vue'
 import PoiDetailPanel from '@/components/map/PoiDetailPanel.vue'
 import PoiHoverCard from '@/components/map/PoiHoverCard.vue'
 import UserPinPopup from '@/components/map/UserPinPopup.vue'
-import SubscribeModal from '@/components/common/SubscribeModal.vue'
 import LimitReachedModal from '@/components/common/LimitReachedModal.vue'
 import InSeasonPlanPage from '@/components/inseason/InSeasonPlanPage.vue'
 import { fetchOpenMeteoCurrentWeather } from '@/services/weather'
@@ -48,7 +47,6 @@ async function onGpxFileChosen(e: Event) {
   }
 }
 
-const subscribeModalOpen = ref(false)
 const limitReachedModalOpen = ref(false)
 
 const dropPinDisabled = computed(() => !authStore.isAuthenticated)
@@ -204,7 +202,7 @@ function placeHuntLocationMarker(location: HuntLocation) {
     className: 'hunt-location-marker-leaflet',
     html: `
       <div class="hunt-location-marker">
-        <span class="material-symbols-outlined"></span>
+        <span class="material-symbols-outlined">location_searching</span>
       </div>
     `,
     iconSize: [34, 34],
@@ -421,13 +419,13 @@ function cancelSelection() {
 }
 
 function analyzeArea() {
-  // Soft paywall: signed-in users without an active sub get the upsell
-  // modal instead of the API call. While we're still loading the sub state
-  // for an authenticated user, hold off — the snapshot lands within ms.
+  // Soft paywall: signed-in users get one free analysis before checkout.
+  // While we're still loading the sub state for an authenticated user, hold
+  // off — the snapshot lands within ms.
   if (authStore.isAuthenticated) {
     if (subscriptionStore.loading) return
-    if (!subscriptionStore.hasAccess) {
-      subscribeModalOpen.value = true
+    if (!subscriptionStore.hasAnalysisAccess) {
+      limitReachedModalOpen.value = true
       return
     }
   }
@@ -616,7 +614,6 @@ onBeforeUnmount(() => {
     <PoiDetailPanel />
     <PoiHoverCard :map="mapInstance" />
     <UserPinPopup :map="mapInstance" />
-    <SubscribeModal v-model="subscribeModalOpen" />
     <LimitReachedModal v-model="limitReachedModalOpen" />
 
     <!-- Stepper panel -->

@@ -16,14 +16,17 @@ const router = useRouter()
 const feedbackOpen = ref(false)
 
 const usageBadge = computed<{ short: string; tooltip: string } | null>(() => {
-  if (!subscriptionStore.hasAccess) return null
+  if (!authStore.isAuthenticated || subscriptionStore.loading) return null
   const limit = subscriptionStore.analysesLimit
   if (limit === Infinity) return null // Guide — don't bother showing a counter
   const used = subscriptionStore.analysesUsed
   const remaining = Math.max(0, limit - used)
+  const free = !subscriptionStore.hasAccess
   return {
-    short: `${remaining} / ${limit} left`,
-    tooltip: `${used} of ${limit} monthly analyses used. Resets on the 1st (UTC).`,
+    short: free ? `Free: ${remaining} left` : `${remaining} / ${limit} left`,
+    tooltip: free
+      ? `${remaining} free analysis${remaining === 1 ? '' : 'es'} left before checkout.`
+      : `${used} of ${limit} monthly analyses used. Resets on the 1st (UTC).`,
   }
 })
 
@@ -139,7 +142,7 @@ async function handleSignOut() {
         <span class="trial-badge-text">Trial: {{ trialBadge.short }}</span>
       </div>
 
-      <!-- Usage badge (Pro only — Guide is unlimited) -->
+      <!-- Usage badge (free + Pro; Guide is unlimited) -->
       <div
         v-if="usageBadge"
         class="usage-badge q-ml-sm"

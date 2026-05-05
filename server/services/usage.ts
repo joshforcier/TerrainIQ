@@ -6,9 +6,7 @@
  *
  * Plan inference reads customers/{uid}/subscriptions for an active or trialing
  * sub and matches the price ID against PLAN_LIMITS. If no active sub exists,
- * the user is `none` and gets 0 analyses (the soft paywall on the client
- * should have already routed them to checkout, but we double-check here so
- * a hand-crafted request can't slip past).
+ * the user is `none` and gets one free analysis after signing in.
  */
 
 import { adminDb } from './firebaseAdmin.js'
@@ -21,11 +19,12 @@ const GUIDE_PRICE_ID = 'price_1TQ9YhB4dW44xtsTeOfPyRYU'
 
 /**
  * Monthly analyze quota per plan. `Infinity` means uncapped (Guide).
+ * `none` is the post-Google-sign-in free tier.
  */
 const PLAN_LIMITS: Record<PlanId, number> = {
   pro: 20,
   guide: Infinity,
-  none: 0,
+  none: 1,
 }
 
 export interface UsageState {

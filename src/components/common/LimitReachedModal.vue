@@ -14,6 +14,11 @@ function close() {
 }
 
 async function upgrade() {
+  if (isFreeLimit.value) {
+    await sub.startCheckout(sub.plans.pro)
+    return
+  }
+
   // Customer Portal lets users switch from Pro to Guide cleanly. Opening a
   // raw checkout for Guide would create a *second* subscription, not an
   // upgrade — Stripe requires plan changes to go through the portal (or
@@ -32,7 +37,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 const used = computed(() => sub.analysesUsed)
 const limit = computed(() => (sub.analysesLimit === Infinity ? '∞' : sub.analysesLimit))
-
+const isFreeLimit = computed(() => !sub.hasAccess)
 /**
  * First day of next UTC month — when Pro's 20-analysis quota resets.
  */
@@ -44,6 +49,16 @@ const resetDate = computed<string>(() => {
     day: 'numeric',
   })
 })
+const title = computed(() => (
+  isFreeLimit.value ? 'Your free analysis is complete' : "You've used all your Pro analyses"
+))
+const subtitle = computed(() => (
+  isFreeLimit.value
+    ? 'Create a plan to keep analyzing terrain, saving POIs, and comparing spots across seasons.'
+    : `You've run ${used.value} of ${limit.value} analyses this month. Your Pro quota resets on ${resetDate.value}, or you can upgrade to Guide for unlimited analyses today.`
+))
+const primaryLabel = computed(() => (isFreeLimit.value ? 'Start Pro Trial' : 'Upgrade to Guide'))
+const secondaryLabel = computed(() => (isFreeLimit.value ? 'Keep Exploring' : `Wait until ${resetDate.value}`))
 </script>
 
 <template>
@@ -54,21 +69,23 @@ const resetDate = computed<string>(() => {
           <q-icon name="close" size="18px" />
         </button>
 
-        <div class="lim-modal-eyebrow">MONTHLY LIMIT REACHED</div>
-        <h2 class="lim-modal-title">You've used all your Pro analyses</h2>
+        <div class="lim-modal-eyebrow">{{ isFreeLimit ? 'FREE ANALYSIS USED' : 'MONTHLY LIMIT REACHED' }}</div>
+        <h2 class="lim-modal-title">{{ title }}</h2>
         <p class="lim-modal-sub">
-          You've run <strong>{{ used }} of {{ limit }}</strong> analyses this month.
-          Your Pro quota resets on <strong>{{ resetDate }}</strong>, or you can upgrade
-          to Guide for unlimited analyses today.
+          {{ subtitle }}
         </p>
 
         <div class="lim-modal-card">
           <div class="lim-modal-card-row">
             <div>
-              <div class="lim-modal-card-name">Guide</div>
-              <div class="lim-modal-card-detail">Unlimited analyses · same features as Pro</div>
+              <div class="lim-modal-card-name">{{ isFreeLimit ? 'Pro' : 'Guide' }}</div>
+              <div class="lim-modal-card-detail">
+                {{ isFreeLimit ? '20 analyses per month · 30-day free trial' : 'Unlimited analyses · same features as Pro' }}
+              </div>
             </div>
-            <div class="lim-modal-card-price">$25<span class="lim-modal-card-per">/mo</span></div>
+            <div class="lim-modal-card-price">
+              {{ isFreeLimit ? '$10' : '$25' }}<span class="lim-modal-card-per">/mo</span>
+            </div>
           </div>
         </div>
 
@@ -82,16 +99,18 @@ const resetDate = computed<string>(() => {
             @click="upgrade"
           >
             <q-spinner v-if="sub.checkoutLoading" size="18px" />
-            <span v-else>Upgrade to Guide</span>
+            <span v-else>{{ primaryLabel }}</span>
           </button>
           <button class="lim-modal-cta lim-modal-cta--ghost" type="button" @click="close">
-            Wait until {{ resetDate }}
+            {{ secondaryLabel }}
           </button>
         </div>
 
         <p class="lim-modal-fineprint">
-          Upgrading takes you to Stripe's billing portal. You'll only pay the
-          prorated difference for the rest of this billing period.
+          {{ isFreeLimit
+            ? "No charge today during the trial. Stripe handles checkout securely."
+            : "Upgrading takes you to Stripe's billing portal. You'll only pay the prorated difference for the rest of this billing period."
+          }}
         </p>
       </div>
     </div>

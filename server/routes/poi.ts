@@ -80,6 +80,45 @@ const STANDARD_PRESSURES = ['low', 'medium', 'high'] as const
 const PRESSURES = ['low', 'medium', 'high', 'max'] as const
 const OPENAI_MODEL = 'gpt-5.4-mini'
 
+function timingId(): string {
+  return Math.random().toString(36).slice(2, 8)
+}
+
+function formatDuration(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
+  return `${ms}ms`
+}
+
+function logTiming(
+  id: string,
+  label: string,
+  phaseStartedAt: number,
+  requestStartedAt: number,
+  suffix = '',
+): void {
+  const now = Date.now()
+  const phase = formatDuration(now - phaseStartedAt)
+  const total = formatDuration(now - requestStartedAt)
+  console.log(`[timing:${id}] ${label}: ${phase} (total ${total})${suffix}`)
+}
+
+async function timed<T>(
+  id: string,
+  label: string,
+  promise: Promise<T>,
+  requestStartedAt: number,
+): Promise<T> {
+  const startedAt = Date.now()
+  try {
+    const result = await promise
+    logTiming(id, label, startedAt, requestStartedAt)
+    return result
+  } catch (err) {
+    logTiming(id, label, startedAt, requestStartedAt, ' FAILED')
+    throw err
+  }
+}
+
 /**
  * Find the nearest terrain grid point to a given lat/lng and return
  * verified elevation, slope, and aspect.
@@ -605,6 +644,8 @@ Respond with ONLY valid JSON:
 }
 
 export async function generatePOIs(req: AuthedRequest, res: Response) {
+  const requestStartedAt = Date.now()
+  const analysisTimingId = timingId()
   const uid = req.uid
   if (!uid) {
     res.status(401).json({ error: 'Unauthenticated' })
@@ -617,6 +658,9 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
   // Clamp buffer to 0.1–2.0 miles
   const bufferMiles = Math.max(0.1, Math.min(2.0, rawBuffer ?? DEFAULT_BUFFER_MILES))
   const bufferMeters = bufferMiles * METERS_PER_MILE
+  console.log(
+    `[timing:${analysisTimingId}] analysis request start: season=${season}, buffer=${bufferMiles.toFixed(2)}, unit=${rawUnitPolygon ? 'yes' : 'no'}`,
+  )
 
   if (!bounds || bounds.north == null || bounds.south == null || bounds.east == null || bounds.west == null) {
     res.status(400).json({ error: 'Missing map bounds' })
@@ -655,9 +699,19 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
 
   if (!unitPolygon) {
     try {
-      const cachedCombos = await getAnalysisCache({ bounds, season, bufferMiles })
+      const cachedCombos = await timed(
+        analysisTimingId,
+        'cache lookup',
+        getAnalysisCache({ bounds, season, bufferMiles }),
+        requestStartedAt,
+      )
       if (cachedCombos) {
-        const usage = await getUsage(uid)
+        const usage = await timed(
+          analysisTimingId,
+          'cache hit usage read',
+          getUsage(uid),
+          requestStartedAt,
+        )
         if (usage.limit <= 0) {
           res.status(402).json({
             error: 'An active subscription is required to run analyses.',
@@ -677,6 +731,7 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
           cacheSource: 'shared',
           cacheVersion: ANALYSIS_CACHE_VERSION,
         })
+        logTiming(analysisTimingId, 'response sent from cache', requestStartedAt, requestStartedAt)
         return
       }
     } catch (err) {
@@ -690,7 +745,12 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
   // prevents users from gaming the limit by triggering errors).
   let usage
   try {
-    usage = await checkAndIncrementUsage(uid)
+    usage = await timed(
+      analysisTimingId,
+      'usage check + increment',
+      checkAndIncrementUsage(uid),
+      requestStartedAt,
+    )
   } catch (err: unknown) {
     if ((err as { code?: string })?.code === 'LIMIT_EXCEEDED') {
       const msg = err instanceof Error ? err.message : 'Monthly limit reached'
@@ -712,20 +772,28 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
   try {
     // ── Step 1: Fetch real data in parallel (shared across all 9 combos) ──
     console.log('Fetching OSM land data + elevation grid + MTBS fire history...')
+    const dataFetchStartedAt = Date.now()
     const [rawLandData, terrainData, rawFireHistory] = await Promise.all([
-      fetchLandData(bounds),
+      timed(analysisTimingId, 'fetch OSM land data', fetchLandData(bounds), requestStartedAt),
       // Adaptive grid: target ~175m cell spacing regardless of bbox size.
       // 200m was the resolution at which the dev inspector reliably caught
       // sharp peaks (confirmed against a real saddle at 46.53732,-111.38111).
       // 175m gives a small margin to dodge bilinear smoothing without
       // bloating the prompt with features from <100m noise.
       // 2mi bbox -> ~20x20, 3mi -> ~28x28, 5mi -> ~46x46, capped 20..60.
-      unitPolygon
-        ? fetchHighResolutionTerrainMetrics(bounds)
-        : fetchElevationGrid(bounds, computeGridSize(bounds)),
-      fetchFireHistory(bounds),
+      timed(
+        analysisTimingId,
+        unitPolygon ? 'fetch high-res terrain metrics' : 'fetch elevation grid',
+        unitPolygon
+          ? fetchHighResolutionTerrainMetrics(bounds)
+          : fetchElevationGrid(bounds, computeGridSize(bounds)),
+        requestStartedAt,
+      ),
+      timed(analysisTimingId, 'fetch MTBS fire history', fetchFireHistory(bounds), requestStartedAt),
     ])
+    logTiming(analysisTimingId, 'parallel data fetch total', dataFetchStartedAt, requestStartedAt)
 
+    const prepareDataStartedAt = Date.now()
     const highResMetrics = unitPolygon ? terrainData as HighResolutionTerrainMetrics : null
     const elevGrid = highResMetrics ? highResMetrics.grid : terrainData as Awaited<ReturnType<typeof fetchElevationGrid>>
 
@@ -760,8 +828,10 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
     console.log(`MTBS: ${fireHistory.length} burn perimeter${fireHistory.length === 1 ? '' : 's'}`)
     console.log(`Road/trail segments for buffer check: ${roadTrailSegments.length}`)
     console.log(`Elevation: ${elevGrid.minElevation.toFixed(0)}m – ${elevGrid.maxElevation.toFixed(0)}m (${elevGrid.points.length} points)`)
+    logTiming(analysisTimingId, 'normalize fetched data', prepareDataStartedAt, requestStartedAt)
 
     // ── Step 2: Analyze terrain from real elevation data ──
+    const terrainStartedAt = Date.now()
     const terrain = appendHighResolutionTerrainNote(
       analyzeTerrainForPrompt(elevGrid, landData, fireHistory),
       highResMetrics,
@@ -783,6 +853,7 @@ export async function generatePOIs(req: AuthedRequest, res: Response) {
     }
 
     // ── Step 3: Build road avoidance section ──
+    const promptContextStartedAt = Date.now()
     let roadAvoidanceSection = ''
     if (landData.roads.length > 0 || landData.trails.length > 0) {
       const roadSamples: string[] = []
@@ -852,6 +923,14 @@ ${features.join('\n')}
 
     // ── Step 5: Compute terrain grid for verification (shared across all combos) ──
     const terrainPoints = computeSlopeAspect(elevGrid)
+    logTiming(
+      analysisTimingId,
+      'terrain analysis + prompt context',
+      terrainStartedAt,
+      requestStartedAt,
+      ` (${terrain.detectedFeatures.length} features, ${terrainPoints.length} verification points)`,
+    )
+    logTiming(analysisTimingId, 'prompt context build', promptContextStartedAt, requestStartedAt)
 
     // ── Step 6: Build and run all standard time×pressure GPT calls plus MAX ──
     const openai = getClient()
@@ -886,24 +965,32 @@ ${features.join('\n')}
     console.log(`Launching ${comboPlans.length} parallel GPT calls (9 standard + MAX pressure) for season: ${season}...`)
 
     const comboPromises = comboPlans.map(async ({ timeOfDay, pressure, key, resultKeys }) => {
+        const comboStartedAt = Date.now()
         const comboBufferMiles = pressure === 'max' ? MAX_PRESSURE_BUFFER_MILES : bufferMiles
         const comboBufferMeters = comboBufferMiles * METERS_PER_MILE
 
         try {
+          const promptStartedAt = Date.now()
           const prompt = buildPrompt(
             season, timeOfDay, pressure, bounds, centerLat, centerLng,
             terrain, featuresList, terrainSummary, fireHistorySummary,
             roadAvoidanceSection, terrainFeaturesSection,
             comboBufferMiles, comboBufferMeters,
           )
+          logTiming(analysisTimingId, `prompt build ${key}`, promptStartedAt, requestStartedAt)
 
-          const completion = await openai.chat.completions.create({
-            model: OPENAI_MODEL,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.7,
-            max_completion_tokens: 8000,
-            response_format: { type: 'json_object' },
-          })
+          const completion = await timed(
+            analysisTimingId,
+            `openai ${key}`,
+            openai.chat.completions.create({
+              model: OPENAI_MODEL,
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.7,
+              max_completion_tokens: 8000,
+              response_format: { type: 'json_object' },
+            }),
+            requestStartedAt,
+          )
 
           const tokenUsage = completion.usage as
             | {
@@ -944,15 +1031,18 @@ ${features.join('\n')}
           const content = choice?.message?.content
           if (!content) {
             console.warn(`Empty response for ${key} (finish_reason: ${choice?.finish_reason})`)
-            return { key, pois: [] }
+            logTiming(analysisTimingId, `combo ${key} total`, comboStartedAt, requestStartedAt, ' EMPTY')
+            return { key, resultKeys, pois: [] }
           }
           if (choice?.finish_reason === 'length') {
             console.warn(`Truncated response for ${key} (hit max_completion_tokens) — skipping`)
-            return { key, pois: [] }
+            logTiming(analysisTimingId, `combo ${key} total`, comboStartedAt, requestStartedAt, ' TRUNCATED')
+            return { key, resultKeys, pois: [] }
           }
 
           const parsed = JSON.parse(content)
           const rawPois = parsed.pois || []
+          const postProcessStartedAt = Date.now()
 
           // Server-side buffer enforcement
           // Buffer radius scaled to settlement size. Cities/towns push elk
@@ -1119,6 +1209,7 @@ ${features.join('\n')}
           // saddles, or finger ridges. Run the same point-centered inspector
           // used by the dev panel and keep the POI only if that precise check
           // agrees with the label.
+          const preciseStartedAt = Date.now()
           const precisePois = await Promise.all(
             verifiedPois.map(async (poi: (typeof verifiedPois)[number]) => {
               const anchorType = normalizeAnchorablePoiType(poi.type)
@@ -1140,6 +1231,13 @@ ${features.join('\n')}
                 preciseFeatures: inspection.features,
               }
             }),
+          )
+          logTiming(
+            analysisTimingId,
+            `precise terrain verification ${key}`,
+            preciseStartedAt,
+            requestStartedAt,
+            ` (${verifiedPois.length} POIs)`,
           )
 
           // AI-labeled benches must sit near a real detected bench feature
@@ -1279,16 +1377,28 @@ ${features.join('\n')}
             }
           }
 
+          logTiming(
+            analysisTimingId,
+            `post-process ${key}`,
+            postProcessStartedAt,
+            requestStartedAt,
+            ` (${rawPois.length} raw → ${finalPois.length} final)`,
+          )
+          logTiming(analysisTimingId, `combo ${key} total`, comboStartedAt, requestStartedAt)
           return { key, resultKeys, pois: finalPois }
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err)
           console.error(`Combo ${key} failed: ${message}`)
+          logTiming(analysisTimingId, `combo ${key} total`, comboStartedAt, requestStartedAt, ' FAILED')
           return { key, resultKeys, pois: [] }
         }
     })
 
+    const allCombosStartedAt = Date.now()
     const results = await Promise.all(comboPromises)
+    logTiming(analysisTimingId, 'all combo promises', allCombosStartedAt, requestStartedAt)
 
+    const mergeResultsStartedAt = Date.now()
     for (const result of results) {
       for (const resultKey of result.resultKeys ?? []) {
         comboResults[resultKey] = result.pois
@@ -1297,6 +1407,7 @@ ${features.join('\n')}
 
     const totalPois = Object.values(comboResults).reduce((sum, arr) => sum + arr.length, 0)
     console.log(`All ${comboPlans.length} GPT calls complete — ${totalPois} total POIs across all displayed combinations`)
+    logTiming(analysisTimingId, 'merge combo results', mergeResultsStartedAt, requestStartedAt, ` (${totalPois} POIs)`)
 
     if (openaiUsageEntries.length > 0) {
       const totals = openaiUsageEntries.reduce(
@@ -1317,7 +1428,12 @@ ${features.join('\n')}
         `est $${totals.estimatedCostUsd.toFixed(4)}`,
       )
       try {
-        await recordOpenAITokenUsage(uid, usage.monthKey, openaiUsageEntries)
+        await timed(
+          analysisTimingId,
+          'record OpenAI token usage',
+          recordOpenAITokenUsage(uid, usage.monthKey, openaiUsageEntries),
+          requestStartedAt,
+        )
       } catch (err) {
         console.error('[usage] failed to record OpenAI token usage:', err)
       }
@@ -1325,7 +1441,12 @@ ${features.join('\n')}
 
     if (!unitPolygon) {
       try {
-        await saveAnalysisCache({ bounds, season, bufferMiles, combos: comboResults })
+        await timed(
+          analysisTimingId,
+          'save analysis cache',
+          saveAnalysisCache({ bounds, season, bufferMiles, combos: comboResults }),
+          requestStartedAt,
+        )
         console.log(
           `[analysis-cache] saved v${ANALYSIS_CACHE_VERSION}, ttl=${ANALYSIS_CACHE_TTL_DAYS}d, season=${season}, buffer=${bufferMiles.toFixed(2)}`,
         )
@@ -1335,7 +1456,9 @@ ${features.join('\n')}
     }
 
     res.json({ combos: comboResults, season, usage, fromCache: false })
+    logTiming(analysisTimingId, 'response sent', requestStartedAt, requestStartedAt)
   } catch (err: unknown) {
+    logTiming(analysisTimingId, 'analysis failed', requestStartedAt, requestStartedAt, ' FAILED')
     console.error('POI generation error:', err)
     const message = err instanceof Error ? err.message : 'Unknown error'
     res.status(500).json({ error: message })

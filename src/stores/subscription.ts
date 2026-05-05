@@ -38,12 +38,12 @@ export interface FirestoreSubscription {
 
 /**
  * Monthly analyze quotas — must match server/services/usage.ts (PLAN_LIMITS).
- * Pro: 20/mo. Guide: unlimited. None: 0.
+ * Free signed-in users get 1 analysis. Pro: 20/mo. Guide: unlimited.
  */
 const PLAN_LIMITS: Record<'pro' | 'guide' | 'none', number> = {
   pro: 20,
   guide: Infinity,
-  none: 0,
+  none: 1,
 }
 
 function currentMonthKey(date = new Date()): string {
@@ -181,6 +181,10 @@ export const useSubscriptionStore = defineStore('subscription', () => {
     return Math.max(0, lim - analysesUsed.value)
   })
 
+  const hasAnalysisAccess = computed(() => {
+    return hasAccess.value || analysesRemaining.value > 0
+  })
+
   /**
    * Trigger a Stripe Checkout session for the given plan. Writes a
    * checkout-session doc; the extension responds with `url` (or `error`)
@@ -271,6 +275,7 @@ export const useSubscriptionStore = defineStore('subscription', () => {
     checkoutLoading,
     checkoutError,
     hasAccess,
+    hasAnalysisAccess,
     isOnTrial,
     trialEndDate,
     trialDaysLeft,
