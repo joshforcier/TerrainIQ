@@ -415,7 +415,7 @@ async function handleSignOut() {
   color: #6b7c8d;
   text-decoration: none;
   font-family: var(--mono, 'JetBrains Mono', monospace);
-  font-size: 10px;
+  font-size: 10px !important;
   font-weight: 900;
   letter-spacing: 0.06em;
   text-transform: uppercase;
