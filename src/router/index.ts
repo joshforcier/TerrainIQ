@@ -25,6 +25,18 @@ const router = createRouter({
       component: () => import('@/views/AnalysisView.vue'),
     },
     {
+      path: '/points',
+      name: 'points',
+      component: () => import('@/views/PointsView.vue'),
+      meta: { hideSidebar: true },
+    },
+    {
+      path: '/reminders',
+      name: 'reminders',
+      component: () => import('@/views/NotificationsView.vue'),
+      meta: { hideSidebar: true },
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/SettingsView.vue'),

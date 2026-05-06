@@ -40,6 +40,29 @@ function boundsFromMap(map: L.Map): SelectionBounds {
   }
 }
 
+function analysisClientId(): string {
+  return Math.random().toString(36).slice(2, 8)
+}
+
+function formatClientDuration(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
+  return `${Math.round(ms)}ms`
+}
+
+function logClientTiming(
+  id: string,
+  label: string,
+  phaseStartedAt: number,
+  requestStartedAt: number,
+  suffix = '',
+): void {
+  const now = performance.now()
+  console.log(
+    `[analysis-client:${id}] ${label}: ${formatClientDuration(now - phaseStartedAt)} ` +
+    `(total ${formatClientDuration(now - requestStartedAt)})${suffix}`,
+  )
+}
+
 export function useAIPois(map: ShallowRef<L.Map | null>) {
   const mapStore = useMapStore()
   const authStore = useAuthStore()
@@ -100,6 +123,13 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
   async function generatePOIs(selectionBounds: SelectionBounds, unitPolygon?: AnalysisUnitPolygon) {
     if (!map.value) return
 
+    const requestStartedAt = performance.now()
+    const timingId = analysisClientId()
+    console.log(
+      `[analysis-client:${timingId}] analysis start: season=${mapStore.season}, ` +
+      `buffer=${mapStore.bufferMiles.toFixed(2)}, unit=${unitPolygon ? 'yes' : 'no'}`,
+    )
+
     loading.value = true
     error.value = null
     errorCode.value = null
@@ -107,18 +137,26 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
 
     try {
       // Cache hit: load from Firestore instead of calling the API.
+      const localCacheStartedAt = performance.now()
       const cached = unitPolygon ? null : analysisStore.findOverlapping(selectionBounds, mapStore.season)
+      logClientTiming(timingId, 'local saved-analysis lookup', localCacheStartedAt, requestStartedAt)
       if (cached && hasMaxPressureCombos(cached.combos)) {
+        const hydrateStartedAt = performance.now()
         loadSavedAnalysisIntoMap(selectionBounds, { replaceActive: true })
+        logClientTiming(timingId, 'hydrate from local cache', hydrateStartedAt, requestStartedAt)
+        logClientTiming(timingId, 'analysis complete from local cache', requestStartedAt, requestStartedAt)
         return
       }
 
       // The /api/generate-pois endpoint requires a Firebase ID token.
+      const tokenStartedAt = performance.now()
       const idToken = await authStore.user?.getIdToken().catch(() => null)
+      logClientTiming(timingId, 'Firebase ID token', tokenStartedAt, requestStartedAt)
       if (!idToken) {
         throw new Error('Sign in required to run an analysis')
       }
 
+      const fetchStartedAt = performance.now()
       const res = await fetch('/api/generate-pois', {
         method: 'POST',
         headers: {
@@ -132,9 +170,12 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
           unitPolygon,
         }),
       })
+      logClientTiming(timingId, 'POST /api/generate-pois', fetchStartedAt, requestStartedAt, ` (status ${res.status})`)
 
       if (!res.ok) {
+        const errorParseStartedAt = performance.now()
         const body = await res.json().catch(() => ({}))
+        logClientTiming(timingId, 'parse error response', errorParseStartedAt, requestStartedAt)
         if (res.status === 402 && body.code === 'LIMIT_EXCEEDED') {
           // Decorate the Error so callers (MapView) can branch on it.
           const limitErr = new Error(
@@ -146,16 +187,28 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
         throw new Error(body.error || `Server error: ${res.status}`)
       }
 
+      const responseParseStartedAt = performance.now()
       const data = await res.json()
+      logClientTiming(
+        timingId,
+        'parse success response',
+        responseParseStartedAt,
+        requestStartedAt,
+        data.fromCache ? ' (server cache hit)' : '',
+      )
+      const hydrateStartedAt = performance.now()
       const combos = hydrateCombos(data.combos || {})
 
       allCombos.value = combos
       analyzedArea.value = selectionBounds
       analyzedSeason.value = mapStore.season
       fromCache.value = Boolean(data.fromCache)
+      const totalPois = Object.values(combos).reduce((sum, list) => sum + list.length, 0)
+      logClientTiming(timingId, 'hydrate POIs into map state', hydrateStartedAt, requestStartedAt, ` (${totalPois} POIs)`)
 
       // Persist for future sessions (silent failure — don't block the user).
       if (authStore.user?.uid && !unitPolygon) {
+        const saveStartedAt = performance.now()
         analysisStore.saveAnalysis({
           userId: authStore.user.uid,
           bounds: selectionBounds,
@@ -163,8 +216,11 @@ export function useAIPois(map: ShallowRef<L.Map | null>) {
           bufferMiles: mapStore.bufferMiles,
           combos,
         })
+        logClientTiming(timingId, 'save analysis locally', saveStartedAt, requestStartedAt)
       }
+      logClientTiming(timingId, 'analysis complete', requestStartedAt, requestStartedAt)
     } catch (err: unknown) {
+      logClientTiming(timingId, 'analysis failed', requestStartedAt, requestStartedAt, ' FAILED')
       error.value = err instanceof Error ? err.message : 'Failed to generate POIs'
       errorCode.value = (err as { code?: string } | null)?.code ?? null
       console.error('AI POI generation failed:', err)

@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import AppHeader from '@/components/common/AppHeader.vue'
 import AppSidebar from '@/components/common/AppSidebar.vue'
 import { useAppStore } from '@/stores/app'
 
 const appStore = useAppStore()
+const route = useRoute()
+const showSidebar = computed(() => route.meta.hideSidebar !== true)
 </script>
 
 <template>
@@ -11,6 +15,7 @@ const appStore = useAppStore()
     <AppHeader />
 
     <q-drawer
+      v-if="showSidebar"
       v-model="appStore.sidebarOpen"
       side="left"
       :width="300"

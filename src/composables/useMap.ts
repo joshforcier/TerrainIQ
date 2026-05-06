@@ -6,6 +6,7 @@ const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string
 const MAPBOX_TOPO_STYLE = (import.meta.env.VITE_MAPBOX_TOPO_STYLE as string | undefined)
   || 'mapbox://styles/joshforcier/cmolyfzwi008901s72vbdddmd'
 const MAPBOX_HYBRID_STYLE = 'joshforcier/cmnyygiw9006x01qv8bpg574v'
+const ROTATED_TILE_BUFFER = 8
 
 interface LayerDef {
   kind?: 'tile' | 'arcgis-export'
@@ -59,6 +60,7 @@ function createArcGisExportLayer(def: LayerDef): L.TileLayer {
     maxZoom: def.maxZoom,
     opacity: def.opacity ?? 1,
     attribution: def.attribution,
+    keepBuffer: ROTATED_TILE_BUFFER,
   })
 
   layer.getTileUrl = function getArcGisExportTileUrl(coords: TileCoords): string {
@@ -109,6 +111,7 @@ export function useMap(containerRef: Ref<HTMLElement | null>) {
           maxNativeZoom: def.maxNativeZoom,
           opacity: def.opacity ?? 1,
           attribution: def.attribution,
+          keepBuffer: ROTATED_TILE_BUFFER,
         })
       tl.addTo(instance)
       currentTileLayers.push(tl)

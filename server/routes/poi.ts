@@ -79,6 +79,13 @@ const TIMES = ['dawn', 'midday', 'dusk'] as const
 const STANDARD_PRESSURES = ['low', 'medium', 'high'] as const
 const PRESSURES = ['low', 'medium', 'high', 'max'] as const
 const OPENAI_MODEL = 'gpt-5.4-mini'
+const PRECISE_INSPECTION_CACHE_TTL_MS = 30 * 60 * 1000
+const PRECISE_INSPECTION_CACHE_MAX = 512
+
+const preciseInspectionCache = new Map<string, {
+  promise: Promise<PointInspection | null>
+  expiresAt: number
+}>()
 
 function timingId(): string {
   return Math.random().toString(36).slice(2, 8)
@@ -153,6 +160,23 @@ function lookupTerrain(
 
 function mToFt(m: number): string {
   return Math.round(m * 3.28084).toLocaleString()
+}
+
+function preciseInspectionCacheKey(lat: number, lng: number): string {
+  // POIs are emitted and logged at 5 decimals; using the same precision
+  // dedupes identical generated spots across the 10 scenario calls.
+  return `${lat.toFixed(5)},${lng.toFixed(5)}`
+}
+
+function prunePreciseInspectionCache(now = Date.now()): void {
+  for (const [key, entry] of preciseInspectionCache) {
+    if (entry.expiresAt <= now) preciseInspectionCache.delete(key)
+  }
+  while (preciseInspectionCache.size > PRECISE_INSPECTION_CACHE_MAX) {
+    const oldest = preciseInspectionCache.keys().next().value
+    if (!oldest) return
+    preciseInspectionCache.delete(oldest)
+  }
 }
 
 /**
@@ -239,7 +263,35 @@ function rankMaxPressurePois<T extends {
  * narrow terrain breaks <200m wide get characterized by their surrounding
  * slope context rather than by one coarse selection-grid cell.
  */
-async function inspectPoiTerrainPrecisely(
+function inspectPoiTerrainPrecisely(
+  lat: number,
+  lng: number,
+): Promise<PointInspection | null> {
+  const now = Date.now()
+  const key = preciseInspectionCacheKey(lat, lng)
+  const cached = preciseInspectionCache.get(key)
+  if (cached && cached.expiresAt > now) {
+    if (process.env.DEBUG_POI_REJECTIONS === '1') {
+      console.log(`[precise-cache] hit ${key}`)
+    }
+    return cached.promise
+  }
+
+  if (cached) preciseInspectionCache.delete(key)
+  prunePreciseInspectionCache(now)
+
+  const promise = inspectPoiTerrainPreciselyUncached(lat, lng).catch((err) => {
+    preciseInspectionCache.delete(key)
+    throw err
+  })
+  preciseInspectionCache.set(key, {
+    promise,
+    expiresAt: now + PRECISE_INSPECTION_CACHE_TTL_MS,
+  })
+  return promise
+}
+
+async function inspectPoiTerrainPreciselyUncached(
   lat: number,
   lng: number,
 ): Promise<PointInspection | null> {

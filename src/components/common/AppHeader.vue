@@ -14,6 +14,7 @@ const mapStore = useMapStore()
 const route = useRoute()
 const router = useRouter()
 const feedbackOpen = ref(false)
+const isDevMode = import.meta.env.DEV
 
 const usageBadge = computed<{ short: string; tooltip: string } | null>(() => {
   if (!authStore.isAuthenticated || subscriptionStore.loading) return null
@@ -52,9 +53,16 @@ const trialBadge = computed<{ short: string; tooltip: string } | null>(() => {
 })
 
 const modeLinks: Array<{ label: string; sub: string; mode: AppMode; icon: string }> = [
-  { label: 'Scouting', sub: 'Mode 01', mode: 'scouting', icon: 'travel_explore' },
-  { label: 'In-Season', sub: 'Mode 02', mode: 'in-season', icon: 'event_note' },
+  { label: 'Scouting', mode: 'scouting', icon: 'travel_explore' },
+  { label: 'PLANNING', mode: 'in-season', icon: 'event_note' },
 ]
+
+const featureLinks = [
+  { label: 'Point Tracker', path: '/points', icon: 'scoreboard', comingSoon: true },
+  { label: 'Reminders', path: '/reminders', icon: 'notifications_active', comingSoon: true },
+]
+
+const showSidebarToggle = computed(() => route.meta.hideSidebar !== true)
 
 function selectMode(mode: AppMode) {
   mapStore.setAppMode(mode)
@@ -73,6 +81,7 @@ async function handleSignOut() {
   <q-header class="app-header">
     <q-toolbar class="toolbar q-px-md">
       <q-btn
+        v-if="showSidebarToggle"
         flat
         dense
         round
@@ -92,7 +101,7 @@ async function handleSignOut() {
           </g>
         </svg>
         <span class="logo-wordmark"><span class="logo-text">Ridge</span><span class="logo-accent">Read</span></span>
-        <span class="logo-badge q-ml-sm">ELK TERRAIN INTELLIGENCE</span>
+        <!-- <span class="logo-badge q-ml-sm">ELK TERRAIN INTELLIGENCE</span> -->
       </q-toolbar-title>
 
       <nav class="mode-links" aria-label="RidgeRead mode">
@@ -113,6 +122,34 @@ async function handleSignOut() {
             <span class="mode-link-live-dot" />
             Beta
           </span>
+        </button>
+      </nav>
+
+      <nav class="feature-links" aria-label="RidgeRead tools">
+        <router-link
+          v-if="isDevMode"
+          v-for="item in featureLinks"
+          :key="item.path"
+          :to="item.path"
+          class="feature-link"
+          :class="{ 'feature-link--active': route.path === item.path }"
+        >
+          <q-icon :name="item.icon" size="16px" />
+          <span>{{ item.label }}</span>
+          <span v-if="item.comingSoon" class="feature-link-badge">Soon</span>
+        </router-link>
+        <button
+          v-else
+          v-for="item in featureLinks"
+          :key="item.path"
+          class="feature-link feature-link--disabled"
+          type="button"
+          disabled
+          title="Coming soon"
+        >
+          <q-icon :name="item.icon" size="16px" />
+          <span>{{ item.label }}</span>
+          <span class="feature-link-badge">Soon</span>
         </button>
       </nav>
 
@@ -270,7 +307,7 @@ async function handleSignOut() {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: 14px;
+  margin-left: 28px;
 }
 
 .mode-link {
@@ -355,6 +392,73 @@ async function handleSignOut() {
 @keyframes header-live-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
+}
+
+/* ─── Feature links ─── */
+.feature-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 24px;
+  padding-left: 24px;
+  border-left: 1px solid rgba(37, 55, 74, 0.7);
+}
+
+.feature-link {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #6b7c8d;
+  text-decoration: none;
+  font-family: var(--mono, 'JetBrains Mono', monospace);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: all 0.2s ease;
+}
+
+.feature-link:disabled {
+  font: inherit;
+}
+
+.feature-link:hover {
+  color: #c8d6e5;
+  background: rgba(200, 214, 229, 0.06);
+}
+
+.feature-link--disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.feature-link--disabled:hover {
+  color: #6b7c8d;
+  background: transparent;
+}
+
+.feature-link--active {
+  color: #e8c547;
+  background: rgba(232, 197, 71, 0.08);
+  border-color: rgba(232, 197, 71, 0.15);
+}
+
+.feature-link-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 5px;
+  border: 1px solid rgba(232, 197, 71, 0.28);
+  border-radius: 4px;
+  background: rgba(232, 197, 71, 0.08);
+  color: #e8c547;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  line-height: 1;
 }
 
 /* ─── Trial badge ─── */
@@ -481,6 +585,20 @@ async function handleSignOut() {
   }
 
   .mode-link-label {
+    display: none;
+  }
+
+  .feature-links {
+    margin-left: 8px;
+    padding-left: 8px;
+    gap: 3px;
+  }
+
+  .feature-link {
+    padding: 6px 8px;
+  }
+
+  .feature-link span {
     display: none;
   }
 }

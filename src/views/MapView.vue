@@ -79,9 +79,14 @@ function onKeydown(e: KeyboardEvent) {
   }
   if (userPinsStore.dropMode && !userPinsStore.draft) userPinsStore.exitDropMode()
 }
-onMounted(() => window.addEventListener('keydown', onKeydown))
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  compassSupported.value = 'DeviceOrientationEvent' in window
+})
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  stopCompassListener()
+  stopMapRotationListeners()
   stopAnalysisTimer()
   stopViewportListener()
   stopHuntLocationListener()
@@ -95,6 +100,124 @@ const baseLayerOptions: { label: string; value: BaseLayer; icon: string }[] = [
   { label: 'Hybrid', value: 'hybrid', icon: 'layers' },
   { label: 'LIDAR', value: 'lidar', icon: 'landscape' },
 ]
+
+type OrientationEventWithWebkit = DeviceOrientationEvent & {
+  webkitCompassHeading?: number
+}
+
+type OrientationEventConstructorWithPermission = typeof DeviceOrientationEvent & {
+  requestPermission?: () => Promise<'granted' | 'denied'>
+}
+
+const compassSupported = ref(false)
+const compassEnabled = ref(false)
+const compassPermissionDenied = ref(false)
+const compassHeading = ref<number | null>(null)
+const compassNeedleRotation = ref(0)
+const mapRotation = ref(0)
+let stopCompassListener: () => void = () => {}
+let stopMapRotationListeners: () => void = () => {}
+
+function normalizeHeading(value: number) {
+  return ((value % 360) + 360) % 360
+}
+
+function shortestRotationDelta(from: number, to: number) {
+  return ((to - from + 540) % 360) - 180
+}
+
+function updateCompassNeedleRotation() {
+  const target = normalizeHeading((compassHeading.value ?? 0) - mapRotation.value)
+  const current = normalizeHeading(compassNeedleRotation.value)
+  compassNeedleRotation.value += shortestRotationDelta(current, target)
+}
+
+function readCompassHeading(event: OrientationEventWithWebkit) {
+  if (typeof event.webkitCompassHeading === 'number') {
+    return normalizeHeading(event.webkitCompassHeading)
+  }
+  if (typeof event.alpha === 'number') {
+    return normalizeHeading(360 - event.alpha)
+  }
+  return null
+}
+
+function handleCompassOrientation(event: Event) {
+  const heading = readCompassHeading(event as OrientationEventWithWebkit)
+  if (heading === null) return
+  compassHeading.value = heading
+}
+
+function addCompassListener() {
+  stopCompassListener()
+  window.addEventListener('deviceorientationabsolute', handleCompassOrientation as EventListener, true)
+  window.addEventListener('deviceorientation', handleCompassOrientation as EventListener, true)
+  stopCompassListener = () => {
+    window.removeEventListener('deviceorientationabsolute', handleCompassOrientation as EventListener, true)
+    window.removeEventListener('deviceorientation', handleCompassOrientation as EventListener, true)
+    stopCompassListener = () => {}
+  }
+}
+
+async function enableCompass() {
+  compassPermissionDenied.value = false
+  const orientationEvent = window.DeviceOrientationEvent as OrientationEventConstructorWithPermission | undefined
+  if (!orientationEvent) {
+    compassSupported.value = false
+    return
+  }
+
+  try {
+    if (typeof orientationEvent.requestPermission === 'function') {
+      const permission = await orientationEvent.requestPermission()
+      if (permission !== 'granted') {
+        compassPermissionDenied.value = true
+        compassEnabled.value = false
+        return
+      }
+    }
+    compassSupported.value = true
+    compassEnabled.value = true
+    addCompassListener()
+  } catch {
+    compassPermissionDenied.value = true
+    compassEnabled.value = false
+  }
+}
+
+function disableCompass() {
+  stopCompassListener()
+  compassEnabled.value = false
+}
+
+function mapIsRotated() {
+  return Math.abs(mapRotation.value) > 0.5
+}
+
+function onCompassClick() {
+  const wasRotated = mapIsRotated()
+  resetMapRotation()
+  if (wasRotated || !compassSupported.value) return
+  if (compassEnabled.value) {
+    disableCompass()
+    return
+  }
+  void enableCompass()
+}
+
+const compassStatusLabel = computed(() => {
+  if (!compassSupported.value) return 'No sensor'
+  if (compassPermissionDenied.value) return 'Permission needed'
+  if (!compassEnabled.value) return 'Compass'
+  if (compassHeading.value === null) return 'Searching'
+  return 'Facing'
+})
+
+const compassNeedleStyle = computed(() => ({
+  transform: `rotate(${compassNeedleRotation.value}deg)`,
+}))
+
+watch([compassHeading, mapRotation], updateCompassNeedleRotation)
 
 const mapContainerRef = ref<InstanceType<typeof MapContainer> | null>(null)
 const stepperCollapsed = ref(false)
@@ -183,6 +306,108 @@ const fromCache = computed(() => mapContainerRef.value?.fromCache ?? false)
 const mapInstance = computed<L.Map | null>(() => (mapContainerRef.value?.map as L.Map | null) ?? null)
 let stopHuntLocationListener: () => void = () => {}
 let huntLocationMarker: L.Marker | null = null
+let rotationRaf: number | null = null
+let rotationDragStartX = 0
+let rotationDragStartValue = 0
+let rotationDraggingDisabled = false
+
+function normalizeMapRotation(value: number) {
+  const normalized = ((value + 180) % 360 + 360) % 360 - 180
+  return Math.abs(normalized) < 0.05 ? 0 : normalized
+}
+
+function stripRotationTransform(transform: string) {
+  return transform.replace(/\s*rotate\([^)]*\)/g, '').trim()
+}
+
+function applyMapRotation() {
+  rotationRaf = null
+  const map = mapInstance.value
+  const mapPane = map?.getPane('mapPane') as HTMLElement | undefined
+  if (!map || !mapPane) return
+
+  const baseTransform = stripRotationTransform(mapPane.style.transform || '')
+  const size = map.getSize()
+  mapPane.style.transformOrigin = `${size.x / 2}px ${size.y / 2}px`
+  mapPane.style.transform = `${baseTransform} rotate(${mapRotation.value}deg)`.trim()
+  map.getContainer().classList.toggle('map-container--rotated', mapIsRotated())
+}
+
+function scheduleMapRotation() {
+  if (rotationRaf !== null) return
+  rotationRaf = window.requestAnimationFrame(applyMapRotation)
+}
+
+function resetMapRotation() {
+  mapRotation.value = 0
+  scheduleMapRotation()
+}
+
+function onMapRotateMove(event: MouseEvent) {
+  event.preventDefault()
+  const deltaX = event.clientX - rotationDragStartX
+  mapRotation.value = normalizeMapRotation(rotationDragStartValue + deltaX * 0.35)
+  scheduleMapRotation()
+}
+
+function onMapRotateUp() {
+  window.removeEventListener('mousemove', onMapRotateMove, true)
+  window.removeEventListener('mouseup', onMapRotateUp, true)
+  const map = mapInstance.value
+  if (map && rotationDraggingDisabled) {
+    map.dragging.enable()
+  }
+  rotationDraggingDisabled = false
+  map?.getContainer().classList.remove('map-container--rotating')
+}
+
+function installMapRotation(map: L.Map | null) {
+  stopMapRotationListeners()
+  if (!map) return
+
+  const container = map.getContainer()
+  const onContextMenu = (event: MouseEvent) => {
+    event.preventDefault()
+  }
+  const onMouseDown = (event: MouseEvent) => {
+    if (event.button !== 2) return
+    if ((event.target as HTMLElement | null)?.closest('.leaflet-control')) return
+    event.preventDefault()
+    event.stopPropagation()
+    rotationDragStartX = event.clientX
+    rotationDragStartValue = mapRotation.value
+    if (map.dragging.enabled()) {
+      map.dragging.disable()
+      rotationDraggingDisabled = true
+    }
+    container.classList.add('map-container--rotating')
+    window.addEventListener('mousemove', onMapRotateMove, true)
+    window.addEventListener('mouseup', onMapRotateUp, true)
+  }
+  const refreshRotation = () => scheduleMapRotation()
+
+  container.addEventListener('contextmenu', onContextMenu)
+  container.addEventListener('mousedown', onMouseDown, true)
+  map.on('move zoom zoomend moveend resize viewreset', refreshRotation)
+  scheduleMapRotation()
+
+  stopMapRotationListeners = () => {
+    container.removeEventListener('contextmenu', onContextMenu)
+    container.removeEventListener('mousedown', onMouseDown, true)
+    window.removeEventListener('mousemove', onMapRotateMove, true)
+    window.removeEventListener('mouseup', onMapRotateUp, true)
+    map.off('move zoom zoomend moveend resize viewreset', refreshRotation)
+    if (rotationRaf !== null) {
+      window.cancelAnimationFrame(rotationRaf)
+      rotationRaf = null
+    }
+    container.classList.remove('map-container--rotating', 'map-container--rotated')
+    stopMapRotationListeners = () => {}
+  }
+}
+
+watch(mapInstance, (map) => installMapRotation(map), { immediate: true })
+watch(mapRotation, scheduleMapRotation)
 
 function huntLocationLabel(lat: number, lng: number): string {
   return `Hunt Location ${lat.toFixed(5)}, ${lng.toFixed(5)}`
@@ -202,7 +427,7 @@ function placeHuntLocationMarker(location: HuntLocation) {
     className: 'hunt-location-marker-leaflet',
     html: `
       <div class="hunt-location-marker">
-        <span class="material-symbols-outlined">location_searching</span>
+        <span class="material-icons">my_location</span>
       </div>
     `,
     iconSize: [34, 34],
@@ -609,6 +834,28 @@ onBeforeUnmount(() => {
       <q-icon name="add_location_alt" size="17px" />
       Click the map to set hunt weather
     </div>
+    <button
+      class="facing-compass"
+      :class="{
+        'facing-compass--active': compassEnabled && compassHeading !== null,
+        'facing-compass--pending': compassEnabled && compassHeading === null,
+        'facing-compass--warn': compassPermissionDenied,
+        'facing-compass--disabled': !compassSupported,
+        'facing-compass--map-rotated': mapIsRotated(),
+      }"
+      type="button"
+      :title="mapIsRotated() ? 'Reset map north-up' : (compassSupported ? compassStatusLabel : 'Device compass not available')"
+      :aria-label="`Compass: ${compassStatusLabel}`"
+      :aria-pressed="compassEnabled"
+      @click="onCompassClick"
+    >
+      <span class="facing-compass__dial" aria-hidden="true">
+        <span class="facing-compass__north">N</span>
+        <span class="facing-compass__needle" :style="compassNeedleStyle">
+          <q-icon name="navigation" size="20px" />
+        </span>
+      </span>
+    </button>
     <HoverTooltip v-if="hoverScores" :scores="hoverScores" />
     <InfoPanel />
     <PoiDetailPanel />
@@ -795,7 +1042,7 @@ onBeforeUnmount(() => {
                 </template>
                 …
               </span>
-              <span v-else>Import GPX</span>
+              <span v-else>Import Waypoints</span>
             </button>
             <button
               v-if="scoutWaypointsStore.waypoints.length > 0"
@@ -1033,6 +1280,119 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
   transform: translateX(-50%);
   white-space: nowrap;
+}
+
+.facing-compass {
+  position: absolute;
+  right: 14px;
+  bottom: 112px;
+  z-index: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid rgba(30, 45, 61, 0.96);
+  border-radius: 50%;
+  background: rgba(15, 25, 35, 0.92);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  color: #c8d6e5;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.facing-compass:hover:not(:disabled) {
+  border-color: rgba(232, 197, 71, 0.36);
+  background: rgba(18, 29, 41, 0.94);
+}
+
+.facing-compass--active {
+  border-color: rgba(232, 197, 71, 0.42);
+}
+
+.facing-compass--warn {
+  border-color: rgba(249, 115, 22, 0.45);
+}
+
+.facing-compass--map-rotated {
+  border-color: rgba(232, 197, 71, 0.65);
+  box-shadow: 0 0 0 2px rgba(232, 197, 71, 0.16), 0 8px 22px rgba(0, 0, 0, 0.35);
+}
+
+.facing-compass--disabled {
+  opacity: 0.55;
+}
+
+.facing-compass__dial {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(200, 214, 229, 0.16);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(232, 197, 71, 0.14) 0 2px, transparent 3px),
+    rgba(8, 13, 20, 0.7);
+}
+
+.facing-compass__dial::before,
+.facing-compass__dial::after {
+  content: '';
+  position: absolute;
+  background: rgba(200, 214, 229, 0.16);
+}
+
+.facing-compass__dial::before {
+  top: 5px;
+  bottom: 5px;
+  left: 50%;
+  width: 1px;
+}
+
+.facing-compass__dial::after {
+  left: 5px;
+  right: 5px;
+  top: 50%;
+  height: 1px;
+}
+
+.facing-compass__north {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  z-index: 1;
+  color: #e8c547;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8px;
+  font-weight: 900;
+  transform: translateX(-50%);
+}
+
+.facing-compass__needle {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #e8c547;
+  filter: drop-shadow(0 0 5px rgba(232, 197, 71, 0.32));
+  transform-origin: center;
+  transition: transform 0.24s ease-out;
+}
+
+.map-page :deep(.map-container--rotated .leaflet-map-pane) {
+  will-change: transform;
+}
+
+.map-page :deep(.map-container--rotating),
+.map-page :deep(.map-container--rotating .leaflet-grab),
+.map-page :deep(.map-container--rotating .leaflet-interactive) {
+  cursor: ew-resize !important;
 }
 
 /* ─── Stepper Card ─── */
@@ -1934,6 +2294,10 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 599px) {
+  .facing-compass {
+    right: 14px;
+    bottom: 104px;
+  }
   .stepper-card {
     width: calc(100vw - 24px);
     max-width: 320px;
@@ -1971,7 +2335,7 @@ onBeforeUnmount(() => {
   pointer-events: none;
   transform: rotate(-45deg);
 }
-.hunt-location-marker .material-symbols-outlined {
+.hunt-location-marker .material-icons {
   font-size: 18px;
   transform: rotate(45deg);
 }

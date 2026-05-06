@@ -8,6 +8,8 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
     "test:terrain": "node --import dotenv/config --import tsx --test \"server/tests/**/*.test.ts\"",
+    "migrate:trophytrack": "node scripts/migrate-trophytrack-firestore.mjs",
+    "import:huntreminder": "node scripts/import-huntreminder.js",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },

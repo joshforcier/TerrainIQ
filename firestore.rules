@@ -72,12 +72,40 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /applications/{applicationId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /huntUnits/{stateId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /drawOdds/{huntDocId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
     match /analysisCache/{cacheId} {
       allow read, write: if false;
     }
 
     match /users/{uid}/pins/{pinId} {
       allow read, create, update, delete: if isOwner(uid);
+    }
+
+    match /users/{uid}/points/{stateId} {
+      allow read, create, update, delete: if isOwner(uid);
+    }
+
+    match /users/{uid}/meta/{metaId} {
+      allow read, create, update, delete: if isOwner(uid);
+
+      match /{document=**} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
     }
 
     match /{document=**} {
